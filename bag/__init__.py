@@ -11,7 +11,7 @@ from . import interface
 from . import design
 from . import data
 from . import tech
-from . import layout
+# from . import layout  # disabled XBase to minimize package dependencies
 
 from .core import BagProject, create_tech_info
 
