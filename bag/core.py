@@ -424,7 +424,8 @@ def create_tech_info(bag_config_path=None):
     else:
         # just make a default tech_info object as place holder.
         print('*WARNING*: No TechInfo class defined.  Using a dummy version.')
-        tech_info = DummyTechInfo(tech_params)
+        # tech_info = DummyTechInfo(tech_params)  # disabled XBase
+        tech_info = None
 
     return tech_info
 
