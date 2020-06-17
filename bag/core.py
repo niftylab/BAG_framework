@@ -17,8 +17,8 @@ from .interface import ZMQDealer
 from .interface.database import DbAccess
 from .design import ModuleDB, SchInstance
 # from .layout.routing import RoutingGrid  # disabled XBase to minimize package dependencies
-from .layout.template import TemplateDB
-from .layout.core import DummyTechInfo
+#from .layout.template import TemplateDB  # disabled XBase to minimize package dependencies 
+#from .layout.core import DummyTechInfo  # disabled XBase to minimize package dependencies 
 from .io import read_file, sim_data, read_yaml_env
 from .concurrent.core import batch_async_task
 
