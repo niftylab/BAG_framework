@@ -408,6 +408,12 @@ class Testbench(object):
         return self.save_dir
 
 
+class DummyTechInfo():
+    """A true-dummy tech info class to disable XBase to minimize package depedencies"""
+    def __init__(self, process_params):
+        self.tech_params = process_params
+
+
 def create_tech_info(bag_config_path=None):
     # type: (Optional[str]) -> TechInfo
     """Create TechInfo object."""
@@ -424,8 +430,9 @@ def create_tech_info(bag_config_path=None):
     else:
         # just make a default tech_info object as place holder.
         #print('*WARNING*: No TechInfo class defined.  Using a dummy version.')
-        # tech_info = DummyTechInfo(tech_params)  # disabled XBase
-        tech_info = None
+        #tech_info = DummyTechInfo(tech_params)  # disabled XBase
+        tech_info = DummyTechInfo(process_params=tech_params)  # disabled XBase
+        #tech_info = None
 
     return tech_info
 
