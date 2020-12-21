@@ -309,7 +309,6 @@ class SkillInterface(DbAccess):
         parameters : dict[str, str]
             a list of testbench parameter values, represented as string.
         """
-
         tb_config = self.db_config['testbench']
 
         cmd = ('instantiate_testbench("{tb_cell}" "{targ_lib}" ' +
@@ -611,3 +610,120 @@ class SkillInterface(DbAccess):
         self._eval_skill(cmd)
         cmd = 'schInstallHDL("%s" "%s" "verilog" "%s" t)' % (lib_name, cell_name, verilog_file)
         self._eval_skill(cmd)
+
+
+class ADELSkillInterface(SkillInterface):
+    """ADE-L & Skill interface between bag and Virtuoso.
+
+    This class sends all bag's database and simulation operations to
+    an external Virtuoso process, then get the result from it.
+
+    Parameters
+    ----------
+    dealer : :class:`bag.interface.ZMQDealer`
+        the socket used to communicate with :class:`~bag.interface.SkillOceanServer`.
+    tmp_dir : string
+        temporary file directory for DbAccess.
+    db_config : dict[str, any]
+        the database configuration dictionary.
+    """
+
+    lib_name = None   # library name
+    cell_name = None  # cell name
+
+    def configure_testbench(self, tb_lib, tb_cell):
+        """Update testbench state for the given testbench.
+
+        This method fill in process-specific information for the given testbench.
+
+        Parameters
+        ----------
+        tb_lib : str
+            testbench library name.
+        tb_cell : str
+            testbench cell name.
+
+        Returns
+        -------
+        cur_env : str
+            the current simulation environment.
+        envs : list[str]
+            a list of available simulation environments.
+        parameters : dict[str, str]
+            a list of testbench parameter values, represented as string.
+        """
+        self.lib_name = tb_lib
+        self.cell_name = tb_cell
+
+        tb_config = self.db_config['testbench']
+
+        cmd = ('adel_instantiate_testbench("{tb_cell}" "{targ_lib}" ' +
+               '"{config_libs}" "{config_views}" "{config_stops}" ' +
+               '"{default_corner}" "{corner_file}" {def_files} ' +
+               '"{tech_lib}" {result_file})')
+        cmd = cmd.format(tb_cell=tb_cell,
+                         targ_lib=tb_lib,
+                         config_libs=tb_config['config_libs'],
+                         config_views=tb_config['config_views'],
+                         config_stops=tb_config['config_stops'],
+                         default_corner=tb_config['default_env'],
+                         corner_file=tb_config['env_file'],
+                         def_files=to_skill_list_str(tb_config['def_files']),
+                         tech_lib=self.db_config['schematic']['tech_lib'],
+                         result_file='{result_file}')
+        output = yaml.load(self._eval_skill(cmd, out_file='result_file'), Loader=yaml.FullLoader)
+        return tb_config['default_env'], output['corners'], output['parameters'], output['outputs']
+
+    def update_testbench(self,
+                         lib,  # type: str
+                         cell,  # type: str
+                         parameters,  # type: Dict[str, str]
+                         sim_envs,  # type: List[str]
+                         config_rules,  # type: List[List[str]]
+                         env_parameters  # type: List[List[Tuple[str, str]]]
+                         ):
+        # type: (...) -> None
+        """Update the given testbench configuration.
+
+        Parameters
+        ----------
+        lib : str
+            testbench library.
+        cell : str
+            testbench cell.
+        parameters : Dict[str, str]
+            testbench parameters.
+        sim_envs : List[str]
+            list of enabled simulation environments.
+        config_rules : List[List[str]]
+            config view mapping rules, list of (lib, cell, view) rules.
+        env_parameters : List[List[Tuple[str, str]]]
+            list of param/value list for each simulation environment.
+        """
+
+        tb_config = self.db_config['testbench']
+        corner_file=tb_config['env_file']
+        cmd = ('adel_modify_testbench("%s" "%s" {conf_rules} {run_opts} "%s" '
+               '{sim_envs} {params} {env_params})' % (lib, cell, corner_file))
+        in_files = {'conf_rules': config_rules,
+                    'run_opts': [],
+                    'sim_envs': sim_envs,
+                    'params': list(parameters.items()),
+                    'env_params': list(zip(sim_envs, env_parameters)),
+                    }
+        self._eval_skill(cmd, input_files=in_files)
+
+    def run_simulation(self, lib, cell, res_file_name=None):
+        """Run ADE-L simulation"""
+        if res_file_name is None:
+            res_file_name = 'sim_results.yaml'
+        save_dir = bag.io.make_temp_dir(prefix='adel_data', parent_dir=self.tmp_dir) 
+        save_full_path = save_dir + '/' + res_file_name
+        cmd = ('adel_run_simulation("%s" "%s" "%s")' % (lib, cell, save_full_path))
+        self._eval_skill(cmd)
+        if os.path.exists(save_full_path):
+            with open(save_full_path, 'r') as stream:
+                results = yaml.load(stream, Loader=yaml.FullLoader)
+        return results
+
+

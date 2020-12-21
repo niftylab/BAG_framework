@@ -253,7 +253,7 @@ class Testbench(object):
             parameter name.
         precision : int
             the parameter value will be rounded to this precision.
-        **kwargs : Any
+        **kwargs :             the sweep parameters.  Refer to the above for example calls.
             the sweep parameters.  Refer to the above for example calls.
         """
         if 'values' in kwargs:
@@ -341,9 +341,13 @@ class Testbench(object):
         value : Optional[str]
             the save directory path.  If simulation is cancelled, return None.
         """
+        '''
         coro = self.async_run_simulation(precision=precision, sim_tag=sim_tag)
         batch_async_task([coro])
         return self.save_dir
+        '''
+        self.results = self.db.run_simulation(self.lib, self.cell)
+        return self.results
 
     def load_sim_results(self, hist_name, precision=6):
         # type: (str, int) -> Optional[str]
