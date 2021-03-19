@@ -214,7 +214,7 @@ procedure( delete_cellview(lib_name cell_name view_name "ttt")
 
 ; Parse the structure of the given cellview.
 ; Works on layout.
-procedure( parse_cad_layout(lib_name cell_name file_name "ttt")
+procedure( parse_cad_layout(lib_name cell_name file_name mpt "tttt")
     let( (cv cell_type p indent rect_cnt label_cnt inst_cnt)
 
         indent = ""
@@ -246,8 +246,11 @@ procedure( parse_cad_layout(lib_name cell_name file_name "ttt")
                     fprintf( p "%slayer: %s %s\n" indent nthelem(1 shape~>lpp) nthelem(2 shape~>lpp))
                     fprintf( p "%sbBox: [[%f, %f], [%f, %f]]\n" indent 
                                  nthelem(1 nthelem(1 shape~>bBox)) nthelem(2 nthelem(1 shape~>bBox)) 
-                                 nthelem(1 nthelem(2 shape~>bBox)) nthelem(2 nthelem(2 shape~>bBox)) 
-                    );fprintf
+                                 nthelem(1 nthelem(2 shape~>bBox)) nthelem(2 nthelem(2 shape~>bBox))
+                           );fprintf
+                    if( mpt == "t" then
+                        fprintf( p "%scolor: %s\n" indent dbGetShapeColor(shape)) ; get the color of the shape
+                    else )
                 )
             );if
             if((rect_cnt == 0) then
