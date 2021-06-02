@@ -209,7 +209,9 @@ class SchInstance(object):
             return True
         if self._master is None:
             raise ValueError('Instance %s has no master.  '
-                             'Did you forget to call design()?' % self._name)
+                             'Implement design() function of the instance or'
+                             'remove BagModule/(your_template_name)'
+                             'if you moved it from the original path.' % self._name)
         return self._master.is_primitive()
 
     @property
