@@ -987,12 +987,15 @@ class ResPhysicalModuleBase(Module):
         # type: () -> Dict[str, str]
         return dict(
             w='resistor width, in meters.',
-            l='resistor length, in meters.',
-            intent='resistor flavor.',
+            l='resistor length, in meters.'
         )
 
-    def design(self, w=1e-6, l=1e-6, intent='standard'):
+    def design(self, w=1e-6, l=1e-6):
         pass
+
+    def is_primitive(self):
+        # type: () -> bool
+        return True
 
     def get_schematic_parameters(self):
         # type: () -> Dict[str, str]
@@ -1002,14 +1005,6 @@ class ResPhysicalModuleBase(Module):
         lstr = l if isinstance(l, str) else float_to_si_string(l)
 
         return dict(w=wstr, l=lstr)
-
-    def get_cell_name_from_parameters(self):
-        # type: () -> str
-        return 'res_%s' % self.params['intent']
-
-    def is_primitive(self):
-        # type: () -> bool
-        return True
 
     def should_delete_instance(self):
         # type: () -> bool
@@ -1062,3 +1057,81 @@ class ResMetalModule(Module):
     def should_delete_instance(self):
         # type: () -> bool
         return self.params['w'] == 0 or self.params['l'] == 0
+
+
+class ResIdealModule(Module):
+    def __init__(self, database, yaml_file, **kwargs):
+        Module.__init__(self, database, yaml_file, **kwargs)
+
+    @classmethod
+    def get_params_info(cls):
+        # type: () -> Dict[str, str]
+        return dict(
+            r = 'resistor resistance'
+            #w='resistor width, in meters.',
+            #l='resistor length, in meters.',
+            #layer='the metal layer ID.',
+        )
+
+    def design(self, r):
+        # type: (float, float, int) -> None
+        pass
+
+    def get_schematic_parameters(self):
+        r = self.params['r'] 
+        # type: () -> Dict[str, str]
+        #w = self.params['w']
+        #l = self.params['l']
+        #layer = self.params['layer']
+        rstr  = float_to_si_string(r)
+        #wstr = float_to_si_string(w)
+        #lstr = float_to_si_string(l)
+        #lay_str = str(layer)
+        return dict(r=rstr)
+
+    def is_primitive(self):
+        # type: () -> bool
+        return True
+
+    def should_delete_instance(self):
+        # type: () -> bool
+        return self.params['r'] == 0 
+
+class CapIdealModuleBase(Module):
+    def __init__(self, database, yaml_file, **kwargs):
+        Module.__init__(self, database, yaml_file, **kwargs)
+
+    @classmethod
+    def get_params_info(cls):
+        # type: () -> Dict[str, str]
+        return dict(
+            c = 'cap capacitance'
+            #w='resistor width, in meters.',
+            #l='resistor length, in meters.',
+            #layer='the metal layer ID.',
+        )
+
+    def design(self, c):
+        # type: (float, float, int) -> None
+        pass
+
+    def get_schematic_parameters(self):
+        c = self.params['c'] 
+        # type: () -> Dict[str, str]
+        #w = self.params['w']
+        #l = self.params['l']
+        #layer = self.params['layer']
+        cstr  = float_to_si_string(c)
+        #wstr = float_to_si_string(w)
+        #lstr = float_to_si_string(l)
+        #lay_str = str(layer)
+        return dict(c=cstr)
+
+    def is_primitive(self):
+        # type: () -> bool
+        return True
+
+    def should_delete_instance(self):
+        # type: () -> bool
+        return self.params['c'] == 0 
+
