@@ -44,11 +44,13 @@ class {{ lib_name }}__{{ cell_name }}(Module):
 
         To modify schematic structure, call:
 
-        rename_pin()
-        delete_instance()
-        replace_instance_master()
-        reconnect_instance_terminal()
+        rename_pin(old_pin, new_pin)
+        add_pin(new_pin, pin_type (input, output, inputOutput))
+        remove_pin(remove_pin)
+        delete_instance(inst_name)
+        replace_instance_master(inst_name, lib_name, cell_name, static=False, index=None)
+        reconnect_instance_terminal(inst_name, term_name, net_name, index=None)
+        array_instance(inst_name, inst_name_list, term_list)
         restore_instance()
-        array_instance()
         """
         pass
