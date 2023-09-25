@@ -1100,6 +1100,7 @@ procedure( convert_template_cells(lib_name cell_name pin_map new_pins inst_list 
         ; update schematic content
         printf("*INFO* Updating %s__%s instances and connections.\n" lib_name cell_name)
         modify_schematic_content(sch inst_list)
+        CCSinvokeCdfCallbacks(sch ?order list("model"))
         ; update schematic pins
         printf("*INFO* Updating %s__%s schematic pins.\n" lib_name cell_name)
         update_schematic_pin(sch pin_map new_pins ipin opin iopin)
