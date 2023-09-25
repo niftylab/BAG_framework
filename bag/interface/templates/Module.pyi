@@ -22,6 +22,7 @@ class {{ lib_name }}__{{ cell_name }}(Module):
     def __init__(self, database, parent=None, prj=None, **kwargs):
         Module.__init__(self, database, self.yaml_file, parent=parent, prj=prj, **kwargs)
 
+    '''
     @classmethod
     def get_params_info(cls):
         # type: () -> Dict[str, str]
@@ -34,6 +35,7 @@ class {{ lib_name }}__{{ cell_name }}(Module):
         """
         return dict(
         )
+    '''
 
     def design(self):
         """To be overridden by subclasses to design this module.
