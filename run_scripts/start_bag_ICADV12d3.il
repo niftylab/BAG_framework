@@ -2158,6 +2158,11 @@ procedure( start_bag_server()
     ipcBeginProcess("bash virt_server.sh" "" 'stdoutHandler 'stderrHandler 'exitHandler "")
 )
 
+;For CDF Parameter Callback
+
+load("/WORK_jupiter/tskang/bag_workspace_tsmcN45/CCSinvokeCdfCallbacks.il")
+load("/WORK_jupiter/tskang/bag_workspace_tsmcN45/CCSCdfCallbackEntireLib.il")
+
 bag_server_started = 0
 bag_modify_adexl_counter = 0
 bag_proc = start_bag_server()
