@@ -54,5 +54,7 @@ class {{ lib_name }}__{{ cell_name }}(Module):
         reconnect_instance_terminal(inst_name, term_name, net_name, index=None)
         array_instance(inst_name, inst_name_list, term_list)
         restore_instance()
+
+        check BAG_framework/bag/design/module.py for details.
         """
         pass
