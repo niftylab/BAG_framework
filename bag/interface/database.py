@@ -358,7 +358,7 @@ class DbAccess(InterfaceBase, abc.ABC):
         """
         pass
 
-    def get_python_template(self, lib_name, cell_name, primitive_table):
+    def get_python_template(self, lib_name, cell_name, primitive_table, sch_info=None):
         # type: (str, str, Dict[str, str]) -> str
         """Returns the default Python Module template for the given schematic.
 
@@ -370,13 +370,28 @@ class DbAccess(InterfaceBase, abc.ABC):
             the cell name.
         primitive_table : Dict[str, str]
             a dictionary from primitive cell name to module template file name.
+        sch_info : Dict or None
+            a dictionary that contains schematic information.
 
         Returns
         -------
         template : str
             the default Python Module template.
         """
-        param_dict = dict(lib_name=lib_name, cell_name=cell_name)
+        # Niftylab only - generate example design code
+        instance_info = sch_info['instances']
+        dsn_str = ""
+        rep_str = ""
+        for iname, iinfo in instance_info.items():
+            if iinfo['lib_name'] != 'basic':
+                dsn_str += f"#self.instances['{iname}'].design(l=lch, w=pw, nf=nf, intent=device_intent) \n        "
+                if iinfo['lib_name'].endswith('templates'):
+                    static_lib_name = lib_name[:-9]+'generated'
+                else:
+                    static_lib_name = lib_name
+                rep_str += f"#self.replace_instance_master(inst_name='{iname}', lib_name='{static_lib_name}', cell_name='{iinfo['cell_name']}', static=True) \n        "
+
+        param_dict = dict(lib_name=lib_name, cell_name=cell_name, dsn_str=dsn_str, rep_str=rep_str)
         if lib_name == 'BAG_prim':
             if cell_name in primitive_table:
                 # load template from user defined file
@@ -587,7 +602,7 @@ class DbAccess(InterfaceBase, abc.ABC):
         # generate new design module file if necessary.
         if not os.path.exists(python_file):
             content = self.get_python_template(lib_name, cell_name,
-                                               self.db_config.get('prim_table', {}))
+                                               self.db_config.get('prim_table', {}), sch_info=sch_info)
             write_file(python_file, content + '\n', mkdir=False)
 
         # recursively import all children

@@ -35,8 +35,11 @@ class {{ lib_name }}__{{ cell_name }}(Module):
         """
         return dict(
         )
+
     '''
 
+    # Design function definition suggestion.
+    #def design(self, lch, nw, pw, nf=2, device_intent='fast'): 
     def design(self):
         """To be overridden by subclasses to design this module.
 
@@ -46,15 +49,27 @@ class {{ lib_name }}__{{ cell_name }}(Module):
 
         To modify schematic structure, call:
 
-        rename_pin(old_pin, new_pin)
-        add_pin(new_pin, pin_type (input, output, inputOutput))
-        remove_pin(remove_pin)
-        delete_instance(inst_name)
-        replace_instance_master(inst_name, lib_name, cell_name, static=False, index=None)
+        rename_pin(old_pin, new_pin): Change pin name
+        add_pin(new_pin, pin_type (input, output, inputOutput)): Add a pin
+        remove_pin(remove_pin): Remove a pin
+        delete_instance(inst_name): Remove an instance
+        replace_instance_master(inst_name, lib_name, cell_name, static=False, index=None): Replace an instance with a new one
         reconnect_instance_terminal(inst_name, term_name, net_name, index=None)
         array_instance(inst_name, inst_name_list, term_list)
         restore_instance()
 
         check BAG_framework/bag/design/module.py for details.
         """
+
+        # Basic parameter suggestions:
+        #self.parameters['lch'] = lch
+        #self.parameters['nw'] = nw
+        #self.parameters['pw'] = pw
+        #self.parameters['nf'] = nf
+        #self.parameters['device_intent'] = device_intent
+       
+        # Example design function call: 
+        {{ dsn_str }}
+        # Example replace_instance_master call:
+        {{ rep_str }}
         pass
