@@ -58,18 +58,18 @@ class {{ lib_name }}__{{ cell_name }}(Module):
         array_instance(inst_name, inst_name_list, term_list)
         restore_instance()
 
-        check BAG_framework/bag/design/module.py for details.
+        Check BAG_framework/bag/design/module.py for details.
         """
 
-        # Basic parameter suggestions:
+        # Example design parameters:
         #self.parameters['lch'] = lch
         #self.parameters['nw'] = nw
         #self.parameters['pw'] = pw
         #self.parameters['nf'] = nf
         #self.parameters['device_intent'] = device_intent
        
-        # Example design function call: 
+        # Example design function calls: 
         {{ dsn_str }}
-        # Example replace_instance_master call:
+        # Example replace_instance_master function calls:
         {{ rep_str }}
         pass
