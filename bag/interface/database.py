@@ -380,19 +380,25 @@ class DbAccess(InterfaceBase, abc.ABC):
         """
         # Niftylab only - generate example design code
         instance_info = sch_info['instances']
-        dsn_str = ""
-        rep_str = ""
+        # design() and replace_instance_master() commands generation
+        dsn_str = "'''\n"
+        rep_str = "'''\n"
         for iname, iinfo in instance_info.items():
             if iinfo['lib_name'] != 'basic':
                 if iinfo['cell_name'].startswith('nmos4'):
-                    dsn_str += f"#self.instances['{iname}'].design(l=lch, w=nw, nf=nf, intent=device_intent) \n        "
+                    dsn_str += f"self.instances['{iname}'].design(l=lch, w=nw, nf=nf, intent=device_intent) \n        "
                 elif iinfo['cell_name'].startswith('pmos4'):
-                    dsn_str += f"#self.instances['{iname}'].design(l=lch, w=pw, nf=nf, intent=device_intent) \n        "
+                    dsn_str += f"self.instances['{iname}'].design(l=lch, w=pw, nf=nf, intent=device_intent) \n        "
+                else:
+                    dsn_str += f"self.instances['{iname}'].design(l=lch, nw=nw, pw=pw, nf=nf, intent=device_intent) \n        "
+
                 if iinfo['lib_name'].endswith('templates'):
                     static_lib_name = lib_name[:-9]+'generated'
                 else:
                     static_lib_name = lib_name
-                rep_str += f"#self.replace_instance_master(inst_name='{iname}', lib_name='{static_lib_name}', cell_name='{iinfo['cell_name']}', static=True) \n        "
+                rep_str += f"self.replace_instance_master(inst_name='{iname}', lib_name='{static_lib_name}', cell_name='{iinfo['cell_name']}', static=True) \n        "
+        dsn_str += "'''\n"
+        rep_str += "'''\n"
 
         param_dict = dict(lib_name=lib_name, cell_name=cell_name, dsn_str=dsn_str, rep_str=rep_str)
         if lib_name == 'BAG_prim':
