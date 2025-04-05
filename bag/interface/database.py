@@ -384,7 +384,10 @@ class DbAccess(InterfaceBase, abc.ABC):
         rep_str = ""
         for iname, iinfo in instance_info.items():
             if iinfo['lib_name'] != 'basic':
-                dsn_str += f"#self.instances['{iname}'].design(l=lch, w=pw, nf=nf, intent=device_intent) \n        "
+                if iinfo['cell_name'].startswith('nmos4'):
+                    dsn_str += f"#self.instances['{iname}'].design(l=lch, w=nw, nf=nf, intent=device_intent) \n        "
+                elif iinfo['cell_name'].startswith('pmos4'):
+                    dsn_str += f"#self.instances['{iname}'].design(l=lch, w=pw, nf=nf, intent=device_intent) \n        "
                 if iinfo['lib_name'].endswith('templates'):
                     static_lib_name = lib_name[:-9]+'generated'
                 else:
