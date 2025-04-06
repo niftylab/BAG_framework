@@ -381,8 +381,8 @@ class DbAccess(InterfaceBase, abc.ABC):
         # Niftylab only - generate example design code
         instance_info = sch_info['instances']
         # design() and replace_instance_master() commands generation
-        dsn_str = "'''\n"
-        rep_str = "'''\n"
+        dsn_str = "'''\n        "
+        rep_str = "'''\n        "
         for iname, iinfo in instance_info.items():
             if iinfo['lib_name'] != 'basic':
                 if iinfo['cell_name'].startswith('nmos4'):
