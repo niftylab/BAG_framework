@@ -390,7 +390,7 @@ class DbAccess(InterfaceBase, abc.ABC):
                 elif iinfo['cell_name'].startswith('pmos4'):
                     dsn_str += f"self.instances['{iname}'].design(l=lch, w=pw, nf=nf, intent=device_intent) \n        "
                 else:
-                    dsn_str += f"self.instances['{iname}'].design(lch=lch, nw=nw, pw=pw, nf=nf, intent=device_intent) \n        "
+                    dsn_str += f"self.instances['{iname}'].design(lch=lch, nw=nw, pw=pw, nf=nf, device_intent=device_intent) \n        "
 
                 if iinfo['lib_name'].endswith('templates'):
                     static_lib_name = lib_name[:-9]+'generated'
