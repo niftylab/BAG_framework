@@ -2093,8 +2093,35 @@ procedure( adel_run_simulation(tb_lib tb_cell res_file_name @optional (tb_ade_vi
     sev_sess_sess = open_adel_session(tb_lib tb_cell "config" tb_ade_view session_name "a")
     sev_session = car(sev_sess_sess)
     session = cadr(sev_sess_sess)
-    asiNetlist(session)
-    asiRunSimulation(session)
+    ;asiNetlist(session)
+    ;asiRunSimulation(session)
+    sevNetlistAndRun(sev_session)
+    ;wait until the simulation is completed.
+    finish = nil
+    while( !finish
+        sleep(5)  ; wait to allow the simulation to run.
+        ; load the log file.
+        p = infile( hiGetLogFileName())
+        log_list = list()
+        when( p
+            while( gets( line p )
+                log_list = append1(log_list line)
+            ); while
+        );when
+        log_list_length = length(log_list)
+        ; check the recent 40 lines and see if the simulation finish message exists.
+        for(log_list_i 1 40
+            ;printf("%s\n" nth(log_list_length-log_list_i log_list))
+            'print(nth(log_list_length-log_list_i log_list))
+            ;printf("\n")
+            if((nth(log_list_length-log_list_i log_list)=="\\o INFO (ADE-3071): Simulation completed successfully.\n") then
+                printf( "*INFO* Simulation completed \n") 
+                finish = 't
+            );if
+        );for 
+        close(p)
+    ); while
+    ; read out the results.
     out_list=asiGetOutputList(session)
     p = outfile( res_file_name "w" )
     foreach( out out_list
