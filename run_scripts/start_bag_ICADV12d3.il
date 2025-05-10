@@ -188,6 +188,17 @@ procedure( parse_cad_sch(lib_name cell_name file_name "ttt")
                         fprintf( p "%snum_bits: %d\n" indent inst_term~>numBits )
                     )
                 )
+                ; Added by J. Han (05-10-2025). Parameters are passed over as well.
+                indent = "    "
+                if( !(cdfGetInstCDF(inst)~>parameters) then
+                    fprintf( p "%sparameters: {}\n" indent )
+                else
+                    fprintf( p "%sparameters:\n" indent )
+                    indent = "      "
+                    foreach( cdf_par cdfGetInstCDF(inst)~>parameters
+                        fprintf( p "%s%s: %s\n" indent cdf_par~>name cdf_par~>value )
+                    );foreach
+                );if
             )
             when(inst_cnt == 0
                 fprintf( p "  {}\n" )
