@@ -156,6 +156,17 @@ procedure( parse_cad_sch(lib_name cell_name file_name "ttt")
         term_names = mapcar( lambda( (x) sprintf(nil "\"%s\"" x) ) term_names )
         fprintf( p "%s ]\n" buildString(term_names ", "))
 
+        ; print pin directions
+        fprintf( p "%spin_directions: [ " indent )
+        if( cell_type == "veriloga" then
+           term_directions = reverse(cv~>terminals~>direction)
+        else
+           term_directions = cv~>terminals~>direction
+        )
+        ; add quotes around pin names to escape array pins
+        term_directions = mapcar( lambda( (x) sprintf(nil "\"%s\"" x) ) term_directions )
+        fprintf( p "%s ]\n" buildString(term_directions ", "))
+
         ; print instances
         if( not(cv~>instances) then
             fprintf( p "%sinstances: {}\n" indent )
