@@ -212,6 +212,12 @@ procedure( parse_cad_sch(lib_name cell_name file_name "ttt")
                         );if
                     );foreach
                 );if
+                ; Added by J. Han (07-18-2025). x/y coordinates are passed over as well.
+                indent = "    "
+                inst_x = car(inst~>xy)
+                inst_y = cadr(inst~>xy)
+                fprintf( p "%sx: %f\n" indent inst_x )
+                fprintf( p "%sy: %f\n" indent inst_y )
             )
             when(inst_cnt == 0
                 fprintf( p "  {}\n" )
