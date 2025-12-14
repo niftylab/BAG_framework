@@ -208,7 +208,9 @@ procedure( parse_cad_sch(lib_name cell_name file_name "ttt")
                     indent = "      "
                     foreach( cdf_par cdfGetInstCDF(inst)~>parameters
                         if( !(cdf_par~>value == nil) then
-                            fprintf( p "%s%s: %s\n" indent cdf_par~>name cdf_par~>value )
+                            if( stringp(cdf_par~>value) then
+                                fprintf( p "%s%s: %s\n" indent cdf_par~>name cdf_par~>value )
+                            );if
                         );if
                     );foreach
                 );if
