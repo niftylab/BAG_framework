@@ -5,11 +5,22 @@
 from typing import Dict, Any
 
 import os
+import sys
 import tempfile
 import time
-from importlib.resources import files as _resource_files
 import codecs
 import string
+
+# Python 3.9+ has importlib.resources.files(); 3.7-3.8 only has read_binary().
+# Both yield bytes for our single read_resource() use case, so we hide the
+# version split behind one helper.
+if sys.version_info >= (3, 9):
+    from importlib.resources import files as _resource_files
+
+    def _read_resource_bytes(package, fname):
+        return _resource_files(package).joinpath(fname).read_bytes()
+else:
+    from importlib.resources import read_binary as _read_resource_bytes
 
 import yaml
 import pickle
@@ -160,7 +171,7 @@ def read_resource(package, fname):
     content : unicode
         the content as a unicode string.
     """
-    raw_content = _resource_files(package).joinpath(fname).read_bytes()
+    raw_content = _read_resource_bytes(package, fname)
     return raw_content.decode(encoding=bag_encoding, errors=bag_codec_error)
 
 

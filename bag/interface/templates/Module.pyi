@@ -3,7 +3,6 @@
 from typing import Dict
 
 import os
-import pkg_resources
 
 from bag.design.module import Module
 
@@ -14,9 +13,9 @@ class {{ lib_name }}__{{ cell_name }}(Module):
 
     Fill in high level description here.
     """
-    yaml_file = pkg_resources.resource_filename(__name__,
-                                                os.path.join('netlist_info',
-                                                             '{{ cell_name }}.yaml'))
+    yaml_file = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             'netlist_info',
+                             '{{ cell_name }}.yaml')
 
 
     def __init__(self, database, parent=None, prj=None, **kwargs):
