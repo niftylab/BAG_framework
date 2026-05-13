@@ -7,7 +7,7 @@ from typing import Dict, Any
 import os
 import tempfile
 import time
-import pkg_resources
+from importlib.resources import files as _resource_files
 import codecs
 import string
 
@@ -160,7 +160,7 @@ def read_resource(package, fname):
     content : unicode
         the content as a unicode string.
     """
-    raw_content = pkg_resources.resource_string(package, fname)
+    raw_content = _resource_files(package).joinpath(fname).read_bytes()
     return raw_content.decode(encoding=bag_encoding, errors=bag_codec_error)
 
 
