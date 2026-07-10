@@ -928,12 +928,14 @@ procedure( get_instance_terminal_wires(sch inst "gg")
 ; and values are new net names.
 procedure( modify_instance_terminal(sch inst wire_list net_map term_mapping "gglll")
     let( (snap_dist key_val old_name new_name fig points mid_point new_wire inst_term inst_pin
-          bbox xval yval term_map_final db_term)
+          bbox xval yval term_map_final db_term handled_terms term_obj)
         ; get schematic snap distance spacing.
         snap_dist = schGetEnv("schSnapSpacing")
         if( wire_list then
+            handled_terms = nil
             foreach( wire_info wire_list
                 old_name = car(wire_info)
+                handled_terms = cons(old_name handled_terms)
                 when(key_val = assoc(old_name term_mapping)
                     new_name = cadr(key_val)
                     fig = cadr(wire_info)
@@ -943,6 +945,37 @@ procedure( modify_instance_terminal(sch inst wire_list net_map term_mapping "ggl
                     schDelete(fig)
                     new_wire = car(schCreateWire(sch "draw" "full" points snap_dist snap_dist 0))
                     schCreateWireLabel(sch new_wire mid_point new_name "lowerCenter" "R0" "stick" 0.0625 nil)
+                )
+            )
+            ; Some BAG template pins are connected by direct labels or non-simple
+            ; wires, so get_instance_terminal_wires() cannot return a wire for
+            ; them.  Still honor explicit reconnect_instance_terminal() mappings
+            ; by adding a small labelled stub at the mapped terminal.
+            foreach( key_val term_mapping
+                old_name = car(key_val)
+                unless( member(old_name handled_terms)
+                    new_name = cadr(key_val)
+                    when(db_term = dbFindTermByName(inst->master old_name)
+                        inst_term = nil
+                        foreach( term_obj inst~>instTerms
+                            when(term_obj~>name == old_name
+                                inst_term = term_obj
+                            )
+                        )
+                        unless(inst_term
+                            inst_term = dbCreateInstTerm(nil inst db_term)
+                        )
+                        inst_pin = car(inst_term~>term~>pins)~>fig
+                        bbox = dbTransformBBox(inst_pin~>bBox inst~>transform)
+                        xval = (xCoord(car(bbox)) + xCoord(cadr(bbox))) / 2.0
+                        yval = (yCoord(car(bbox)) + yCoord(cadr(bbox))) / 2.0
+                        xval = round2(xval / snap_dist) * snap_dist
+                        yval = round2(yval / snap_dist) * snap_dist
+
+                        new_wire = car(schCreateWire(sch "draw" "full" list(xval-snap_dist:yval-snap_dist xval:yval)
+                                       snap_dist snap_dist 0))
+                        schCreateWireLabel(sch new_wire xval:yval new_name "lowerCenter" "R0" "stick" 0.0625 nil)
+                    )
                 )
             )
             't
@@ -980,15 +1013,35 @@ procedure( modify_instance_terminal(sch inst wire_list net_map term_mapping "ggl
     )
 )
 
+; Mark a generated schematic as connectivity-current for OA netlisting.
+procedure( mark_schematic_current(sch "g")
+    let( (counter final_counter)
+        ; BAG creates schematics programmatically from copied templates.  In this
+        ; flow schCheckHier can leave copied OA extraction counters stale, which
+        ; makes si fail with OSSHNL-109 even after the schematic content is valid.
+        counter = dbGetCellViewCounter(sch)
+        final_counter = counter + 3
+        dbReplaceProp(sch "schGeometryLastUpdated" "int" final_counter)
+        dbReplaceProp(sch "connectivityLastUpdated" "int" final_counter)
+        dbReplaceProp(sch "lastSchematicExtraction" "time" getCurrentTime())
+    )
+)
+
 ; Perform check-and-save on the given schematic database object, then close it.
 procedure( check_and_save_schematic(sch "g")
     let( (errs)
         schSetEnv( "checkHierSave" 't)
         schSetEnv( "saveAction" "Save")
+        ; schCheckHier may not persist library-only master replacements unless
+        ; the schematic is explicitly saved first.  Keep schCheckHier last so
+        ; source netlisting sees a clean checked-and-saved cellview.
+        dbSave(sch)
         errs = schCheckHier(sch "schematic symbol" "")
         foreach( ex errs
             warn( "%s__%s (%s) has %d errors." car(ex)~>lib~>name car(ex)~>cellName car(ex)~>viewName cadr(ex))
         )
+        mark_schematic_current(sch)
+        dbSave(sch)
         ; make sure all edit locks are gone by reopening in read mode
         dbReopen(sch, "r")
         dbClose(sch)
@@ -1104,6 +1157,16 @@ procedure( modify_schematic_content(sch_cv inst_list "gl")
                             )
                             wire_list = nil
                         )
+                    )
+                    when( wire_list && rinst->term_mapping
+                        ; Explicit reconnect_instance_terminal() requests should
+                        ; define the final terminal-to-net mapping.  Rebuilding
+                        ; terminal stubs avoids stale template labels winning
+                        ; over a relabeled or non-simple existing wire.
+                        foreach( wire_info wire_list
+                            schDelete(cadr(wire_info))
+                        )
+                        wire_list = nil
                     )
                     ; modify connections, keeping old wires around
                     ; printf("instance %s wire_list: %A net_map: %A term_map: %A\n" cur_inst~>name wire_list net_map rinst->term_mapping)
