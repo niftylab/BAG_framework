@@ -479,6 +479,13 @@ class SkillInterface(DbAccess):
         in_files = {'cell_view_list': cell_view_list}
         return self._eval_skill(cmd, input_files=in_files)
 
+    def delete_cellviews(self, lib_name, cell_view_list):
+        """Delete the given cell views after releasing write locks."""
+        self.release_write_locks(lib_name, cell_view_list)
+        for cell_name, view_name in cell_view_list:
+            cmd = 'delete_cellview( "%s" "%s" "%s" )' % (lib_name, cell_name, view_name)
+            self._eval_skill(cmd)
+
     def create_schematic_from_netlist(self, netlist, lib_name, cell_name,
                                       sch_view=None, **kwargs):
         # type: (str, str, str, Optional[str], **Any) -> None

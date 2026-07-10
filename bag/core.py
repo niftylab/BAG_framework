@@ -1282,6 +1282,22 @@ class BagProject(object):
 
         self.impl_db.release_write_locks(lib_name, cell_view_list)
 
+    def delete_cellviews(self, lib_name, cell_view_list):
+        # type: (str, Sequence[Tuple[str, str]]) -> None
+        """Delete the given cell views from the CAD database.
+
+        Parameters
+        ----------
+        lib_name : str
+            the library name.
+        cell_view_list : Sequence[Tuple[str, str]]
+            list of cell/view name tuples.
+        """
+        if self.impl_db is None:
+            raise Exception('BAG Server is not set up.')
+
+        self.impl_db.delete_cellviews(lib_name, cell_view_list)
+
     def run_lvs(self,  # type: BagProject
                 lib_name,  # type: str
                 cell_name,  # type: str

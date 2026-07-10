@@ -318,6 +318,20 @@ class DbAccess(InterfaceBase, abc.ABC):
         pass
 
     @abc.abstractmethod
+    def delete_cellviews(self, lib_name, cell_view_list):
+        # type: (str, Sequence[Tuple[str, str]]) -> None
+        """Delete the given cell views from the database.
+
+        Parameters
+        ----------
+        lib_name : str
+            the library name.
+        cell_view_list : Sequence[Tuple[str, str]]
+            list of cell/view name tuples.
+        """
+        pass
+
+    @abc.abstractmethod
     def create_schematic_from_netlist(self, netlist, lib_name, cell_name,
                                       sch_view=None, **kwargs):
         # type: (str, str, str, Optional[str], **Any) -> None

@@ -101,6 +101,14 @@ class ModuleDB(MasterDB):
 
         self._prj.instantiate_schematic(lib_name, content_list, lib_path=self.lib_path)
 
+    def delete_cellviews(self, lib_name, cell_view_list):
+        # type: (str, Sequence[Tuple[str, str]]) -> None
+        """Delete the given cell views in the design database."""
+        if self._prj is None:
+            raise ValueError('BagProject is not defined.')
+
+        self._prj.delete_cellviews(lib_name, cell_view_list)
+
     @property
     def tech_info(self):
         # type: () -> TechInfo
@@ -307,7 +315,7 @@ class SchInstance(object):
         """Implement this design module in the given library.
 
         If the given library already exists, this method will not delete or override
-        any pre-existing cells in that library.
+        any pre-existing cells in that library unless overwrite is True.
 
         If you use this method, you do not need to call update_structure(),
         as this method calls it for you.
@@ -325,7 +333,8 @@ class SchInstance(object):
         suffix : str
             suffix to add to cell names.
         **kwargs : Any
-            additional arguments.
+            additional arguments. If overwrite is True, delete the top cell's
+            schematic and symbol views before generating it.
         """
         if 'erase' in kwargs:
             print('DEPRECATED WARNING: erase is no longer supported '
@@ -333,6 +342,7 @@ class SchInstance(object):
 
         debug = kwargs.get('debug', False)
         rename_dict = kwargs.get('rename_dict', None)
+        overwrite = kwargs.get('overwrite', False)
 
         if not top_cell_name:
             top_cell_name = None
@@ -341,6 +351,13 @@ class SchInstance(object):
             self._db.lib_path = kwargs['lib_path']
         self._db.cell_prefix = prefix
         self._db.cell_suffix = suffix
+        if overwrite:
+            target_cell = top_cell_name or self._master.cell_name
+            if rename_dict:
+                target_cell = rename_dict.get(target_cell, target_cell)
+            target_cell = '%s%s%s' % (prefix, target_cell, suffix)
+            cell_view_list = [(target_cell, view_name) for view_name in ('schematic', 'symbol')]
+            self._db.delete_cellviews(lib_name, cell_view_list)
         self._db.instantiate_masters([self._master], [top_cell_name], lib_name=lib_name,
                                      debug=debug, rename_dict=rename_dict)
 
