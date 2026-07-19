@@ -14,3 +14,5 @@ Ocean (with ADEXL) for schematic design and simulation, respectively.
     bag_config/bag_config
     tech_config/tech_config
     new_pdk
+    cdl_annotations
+    cdl_annotations_ko

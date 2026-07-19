@@ -1,14 +1,17 @@
 database
 ========
 
-This entry defines all settings related to Virtuoso.
+This entry defines settings for the selected schematic database backend.
 
 
-data.class
-----------
+database.class
+--------------
 
 The Python class that handles database interaction.  This entry is mainly to support non-Virtuoso CAD programs.  If you
-use Virtuoso, the value must be ``bag.interface.skill.SkillInterface``.
+use Virtuoso, the value must be ``bag.interface.skill.SkillInterface`` or one
+of its subclasses.  Server-backed classes use the configured ``socket``.
+Local classes such as ``bag.interface.cdl.CdlInterface`` declare that
+they do not require a server and can be constructed without ``socket``.
 
 database.schematic
 ------------------

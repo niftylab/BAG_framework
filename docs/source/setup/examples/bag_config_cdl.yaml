@@ -1,0 +1,21 @@
+# Import-only BAG configuration for annotated CDL templates.
+database:
+  class: "bag.interface.cdl.CdlInterface"
+  default_lib_path: "${BAG_WORK_DIR}/gen_libs"
+  schematic:
+    exclude_libraries:
+      - "BAG_prim"
+      - "basic"
+      - "analogLib"
+  cdl:
+    source_files:
+      - "${BAG_WORK_DIR}/netlists/logic_templates.sp"
+    template_root: "${BAG_WORK_DIR}/BagModules"
+    strict: true
+    output:
+      extension: ".sp"
+      line_length: 100
+
+tech_config_path: "${BAG_WORK_DIR}/tech_config.yaml"
+lib_defs: "bag_libs.def"
+new_lib_path: "${BAG_WORK_DIR}/BagModules"

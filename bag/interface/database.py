@@ -71,6 +71,8 @@ class DbAccess(InterfaceBase, abc.ABC):
         the database configuration dictionary.
     """
 
+    requires_server = True
+
     def __init__(self, tmp_dir, db_config):
         # type: (str, Dict[str, Any]) -> None
         InterfaceBase.__init__(self)
@@ -78,15 +80,19 @@ class DbAccess(InterfaceBase, abc.ABC):
         self.tmp_dir = make_temp_dir('dbTmp', parent_dir=tmp_dir)
         self.db_config = db_config
         self.exc_libs = set(db_config['schematic']['exclude_libraries'])
-        # noinspection PyBroadException
-        try:
-            check_kwargs = self.db_config['checker'].copy()
-            check_kwargs['tmp_dir'] = self.tmp_dir
-            self.checker = make_checker(**check_kwargs)  # type: Optional[Checker]
-        except Exception:
-            stack_trace = traceback.format_exc()
-            print('*WARNING* error creating Checker:\n%s' % stack_trace)
-            print('*WARNING* LVS/RCX will be disabled.')
+        checker_config = self.db_config.get('checker')
+        if checker_config:
+            # noinspection PyBroadException
+            try:
+                check_kwargs = checker_config.copy()
+                check_kwargs['tmp_dir'] = self.tmp_dir
+                self.checker = make_checker(**check_kwargs)  # type: Optional[Checker]
+            except Exception:
+                stack_trace = traceback.format_exc()
+                print('*WARNING* error creating Checker:\n%s' % stack_trace)
+                print('*WARNING* LVS/RCX will be disabled.')
+                self.checker = None  # type: Optional[Checker]
+        else:
             self.checker = None  # type: Optional[Checker]
 
         # set default lib path

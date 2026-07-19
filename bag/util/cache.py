@@ -112,10 +112,21 @@ class ClassImporter(object):
         lib_path : str
             path to this library.
         """
-        if lib_name not in self.libraries:
-            lib_path = os.path.abspath(lib_path)
-            self.libraries[lib_name] = lib_path
-            write_file(self.lib_defs, '%s %s\n' % (lib_name, lib_path), append=True)
+        lib_path = os.path.abspath(lib_path)
+        if lib_name in self.libraries:
+            old_path = os.path.normcase(os.path.realpath(self.libraries[lib_name]))
+            new_path = os.path.normcase(os.path.realpath(lib_path))
+            if old_path != new_path:
+                raise ValueError(
+                    'Library %s is already defined at %s, not %s.'
+                    % (lib_name, self.libraries[lib_name], lib_path)
+                )
+            return
+
+        self.libraries[lib_name] = lib_path
+        if lib_path not in sys.path:
+            sys.path.append(lib_path)
+        write_file(self.lib_defs, '%s %s\n' % (lib_name, lib_path), append=True)
 
     def get_library_path(self, lib_name):
         """Returns the location of the given library.

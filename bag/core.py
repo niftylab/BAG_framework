@@ -472,19 +472,18 @@ class BagProject(object):
 
         self.bag_config = read_yaml_env(bag_config_path)
         bag_tmp_dir = os.environ.get('BAG_TEMP_DIR', None)
+        db_config = self.bag_config['database']
+        db_cls = _import_class_from_str(db_config['class'])
+        db_requires_server = getattr(db_cls, 'requires_server', True)
 
-        # get port files
-        if port is None:
+        # Server-backed databases use the configured ZMQ port.  Local
+        # databases, such as annotated netlist backends, need no socket.
+        if db_requires_server and port is None:
             socket_config = self.bag_config['socket']
             if 'port_file' in socket_config:
                 port, msg = _get_port_number(socket_config['port_file'])
                 if msg:
                     print('*WARNING* %s' % msg)
-
-        # create ZMQDealer object
-        dealer_kwargs = {}
-        dealer_kwargs.update(self.bag_config['socket'])
-        del dealer_kwargs['port_file']
 
         # create TechInfo instance
         self.tech_info = create_tech_info(bag_config_path=bag_config_path)
@@ -494,22 +493,32 @@ class BagProject(object):
             lib_defs_file = _get_config_file_abspath(self.bag_config['lib_defs'])
         except ValueError:
             lib_defs_file = ''
-        sch_exc_libs = self.bag_config['database']['schematic']['exclude_libraries']
+        sch_exc_libs = db_config['schematic']['exclude_libraries']
         self.dsn_db = ModuleDB(lib_defs_file, self.tech_info, sch_exc_libs, prj=self)
 
-        if port is not None:
-            # make DbAccess instance.
+        if db_requires_server and port is not None:
+            # Make a server-backed DbAccess instance.
+            dealer_kwargs = self.bag_config['socket'].copy()
+            dealer_kwargs.pop('port_file', None)
             dealer = ZMQDealer(port, **dealer_kwargs)
-            db_cls = _import_class_from_str(self.bag_config['database']['class'])
-            self.impl_db = db_cls(dealer, bag_tmp_dir, self.bag_config['database'])
+            self.impl_db = db_cls(dealer, bag_tmp_dir, db_config)
+            self._default_lib_path = self.impl_db.default_lib_path
+        elif not db_requires_server:
+            # Local database backends have no external server/dealer.
+            self.impl_db = db_cls(bag_tmp_dir, db_config)
             self._default_lib_path = self.impl_db.default_lib_path
         else:
             self.impl_db = None  # type: Optional[DbAccess]
-            self._default_lib_path = DbAccess.get_default_lib_path(self.bag_config['database'])
+            self._default_lib_path = DbAccess.get_default_lib_path(db_config)
 
-        # make SimAccess instance.
-        sim_cls = _import_class_from_str(self.bag_config['simulation']['class'])
-        self.sim = sim_cls(bag_tmp_dir, self.bag_config['simulation'])  # type: SimAccess
+        # Make SimAccess instance when simulation is configured.  Template
+        # import-only projects do not need a simulator.
+        sim_config = self.bag_config.get('simulation')
+        if sim_config:
+            sim_cls = _import_class_from_str(sim_config['class'])
+            self.sim = sim_cls(bag_tmp_dir, sim_config)  # type: Optional[SimAccess]
+        else:
+            self.sim = None  # type: Optional[SimAccess]
 
     @property
     def default_lib_path(self):
