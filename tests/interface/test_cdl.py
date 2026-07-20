@@ -134,6 +134,53 @@ def test_cdl_interface_writes_structural_implementation(tmp_path):
     assert '.ENDS buffer_generated' in top_text
 
 
+def test_cdl_interface_uses_child_subckt_pin_order(tmp_path):
+    source = tmp_path / 'hierarchy.cdl'
+    source.write_text(
+        '.SUBCKT child A B C\n'
+        '* @BAG {"lib_name":"logic_templates"}\n'
+        '*.PININFO A:B B:B C:B\n'
+        '.ENDS child\n'
+        '.SUBCKT parent P Q R\n'
+        '* @BAG {"lib_name":"logic_templates"}\n'
+        '*.PININFO P:B Q:B R:B\n'
+        'XU0 netB netC netA child '
+        '$ @BAG {"lib_name":"logic_templates",'
+        '"terminals":["B","C","A"]}\n'
+        '.ENDS parent\n',
+        encoding='utf-8',
+    )
+    output_root = tmp_path / 'generated'
+    output_root.mkdir()
+    interface = CdlInterface(None, make_config(source, output_root))
+
+    interface.instantiate_schematic(
+        'logic_generated',
+        [(
+            'logic_templates',
+            'parent',
+            'parent_impl',
+            {'P': 'P', 'Q': 'Q', 'R': 'R'},
+            {
+                'XU0': [{
+                    'name': 'XU0',
+                    'lib_name': 'logic_generated',
+                    'cell_name': 'child_impl',
+                    'params': {},
+                    'term_mapping': {},
+                }],
+            },
+            [],
+        )],
+        lib_path=str(output_root),
+    )
+
+    output = (
+        output_root / 'logic_generated' / 'parent_impl.sp'
+    ).read_text(encoding='utf-8')
+    assert 'XU0 netA netB netC child_impl' in output
+
+
 def test_cdl_writer_output_options_and_validation(tmp_path):
     output_root = tmp_path / 'generated_netlists'
     output_root.mkdir()

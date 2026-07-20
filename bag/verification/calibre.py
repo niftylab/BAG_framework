@@ -189,10 +189,22 @@ class Calibre(VirtuosoChecker):
                     'source_netlist_path does not exist: {}'
                     .format(source_netlist_path)
                 )
+            source_netlist_path = os.path.abspath(source_netlist_path)
+            source_netlist_dir = os.path.dirname(source_netlist_path)
+            with open_temp(prefix='copySourceTree', dir=run_dir,
+                           delete=True) as f:
+                copy_tree_log_file = f.name
+            copy_tree_cmd = [
+                'cp', '-R', os.path.join(source_netlist_dir, '.'),
+                os.path.abspath(run_dir),
+            ]
+            flow_list.append(
+                (copy_tree_cmd, copy_tree_log_file, None, None, _all_pass)
+            )
             with open_temp(prefix='copySource', dir=run_dir, delete=True) as f:
                 copy_log_file = f.name
             copy_cmd = [
-                'cp', os.path.abspath(source_netlist_path),
+                'cp', source_netlist_path,
                 os.path.abspath(sch_file),
             ]
             flow_list.append(

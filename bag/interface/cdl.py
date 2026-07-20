@@ -114,6 +114,16 @@ class CdlInterface(NetlistInterface):
                 child = child_entry[1]
                 if len(instance.terminals) != len(child.pins):
                     continue
+                connections = instance.connections
+                if set(connections) == set(child.pins):
+                    instance.terminals = list(child.pins)
+                    instance.nodes = [
+                        connections[terminal] for terminal in child.pins
+                    ]
+                    instance.terminal_directions = dict(
+                        child.pin_directions
+                    )
+                    continue
                 instance.terminal_directions = dict(
                     (terminal, child.pin_directions[child_pin])
                     for terminal, child_pin in zip(instance.terminals, child.pins)

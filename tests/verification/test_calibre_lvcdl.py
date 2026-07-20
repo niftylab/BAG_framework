@@ -26,8 +26,18 @@ def _make_checker(tmp_path):
 
 def test_setup_lvs_flow_uses_external_cdl_and_distinct_source_cell(tmp_path):
     checker = _make_checker(tmp_path)
-    source = tmp_path / 'generated.sp'
-    source.write_text('.subckt schematic_top A B\n.ends\n', encoding='utf-8')
+    source_dir = tmp_path / 'cdl'
+    source_dir.mkdir()
+    source = source_dir / 'generated.sp'
+    source.write_text(
+        '.include "child.sp"\n'
+        '.subckt schematic_top A B\n.ends\n',
+        encoding='utf-8',
+    )
+    (source_dir / 'child.sp').write_text(
+        '.subckt child A B\n.ends\n',
+        encoding='utf-8',
+    )
 
     flow = checker.setup_lvs_flow(
         'layout_lib',
@@ -39,7 +49,10 @@ def test_setup_lvs_flow_uses_external_cdl_and_distinct_source_cell(tmp_path):
 
     assert flow[0][0][0] == 'export-layout'
     assert flow[1][0][0] == 'cp'
-    assert Path(flow[1][0][1]) == source
+    assert flow[1][0][1] == '-R'
+    assert Path(flow[1][0][2]) == source_dir / '.'
+    assert flow[2][0][0] == 'cp'
+    assert Path(flow[2][0][1]) == source
     assert all(step[0][0] != 'export-schematic' for step in flow)
 
     runset_path = flow[-1][0][4]
