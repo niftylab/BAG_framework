@@ -198,6 +198,68 @@ def test_cdl_writer_output_options_and_validation(tmp_path):
         )
 
 
+def test_cdl_writer_accepts_bag_instance_names_and_pin_symbols(tmp_path):
+    source = tmp_path / 'inv.cdl'
+    source.write_text(
+        '.SUBCKT inv I O VDD VSS\n'
+        '* @BAG {"lib_name":"logic_templates"}\n'
+        '*.PININFO I:I O:O VDD:B VSS:B\n'
+        'MIN0 O I VSS VSS nmos4_fast w=220n l=30n nf=2 '
+        '$ @BAG {"lib_name":"BAG_prim"}\n'
+        '.ENDS inv\n',
+        encoding='utf-8',
+    )
+    output_root = tmp_path / 'generated'
+    output_root.mkdir()
+    config = make_config(source, output_root)
+    config['cdl']['output'] = {
+        'primitive_wrappers': {
+            'BAG_prim/nmos4_fast': {
+                'terminals': ['B', 'D', 'G', 'S'],
+                'body': 'MM0 D G S B nch_ulvt_mac l=l w=w m=1*nf nf=1',
+            },
+        },
+    }
+    interface = CdlInterface(None, config)
+
+    interface.instantiate_schematic(
+        'logic_generated',
+        [(
+            'logic_templates',
+            'inv',
+            'inv_lvs_2x',
+            {'I': 'I', 'O': 'O', 'VDD': 'VDD', 'VSS': 'VSS'},
+            {
+                'IN0': [{
+                    'name': 'IN0',
+                    'lib_name': 'BAG_prim',
+                    'cell_name': 'nmos4_fast',
+                    'params': {'nf': 4},
+                    'term_mapping': {},
+                }],
+                'PIN0': [{
+                    'name': 'PIN0',
+                    'lib_name': 'basic',
+                    'cell_name': 'ipin',
+                    'params': {},
+                    'term_mapping': {},
+                }],
+            },
+            [],
+        )],
+        lib_path=str(output_root),
+    )
+
+    output = (
+        output_root / 'logic_generated' / 'inv_lvs_2x.sp'
+    ).read_text(encoding='utf-8')
+    assert '.SUBCKT nmos4_fast B D G S' in output
+    assert 'MM0 D G S B nch_ulvt_mac' in output
+    assert 'XIN0 VSS O I VSS nmos4_fast' in output
+    assert 'nf=4' in output
+    assert 'PIN0' not in output
+
+
 def test_import_design_library_creates_bag_templates(tmp_path):
     output_root = tmp_path / 'BagModules'
     output_root.mkdir()
@@ -354,3 +416,27 @@ def test_import_cdl_cli(tmp_path):
     assert (
         output_root / 'logic_templates' / 'netlist_info' / 'buffer2.yaml'
     ).is_file()
+
+
+def test_cdl_interface_returns_generated_netlist_path(tmp_path):
+    output_root = tmp_path / 'generated_netlists'
+    output_root.mkdir()
+    interface = CdlInterface(
+        None, make_config(DATA_DIR / 'inv.sp', output_root)
+    )
+
+    output_files = interface.create_implementation(
+        'logic_generated',
+        [('logic_templates', 'inv', 'inv_generated')],
+        [dict(
+            pin_map={'IN': 'IN', 'OUT': 'OUT', 'VDD': 'VDD', 'VSS': 'VSS'},
+            inst_list=[],
+            new_pins=[],
+        )],
+    )
+
+    assert interface.get_implementation_path(
+        'logic_generated', 'inv_generated'
+    ) == output_files[0]
+    with pytest.raises(ValueError, match='has not been generated'):
+        interface.get_implementation_path('logic_generated', 'missing')

@@ -166,6 +166,9 @@ class Calibre(VirtuosoChecker):
 
         # Check if gds layout is provided
         gds_layout_path = kwargs.pop('gds_layout_path', None)
+        source_netlist_path = kwargs.pop('source_netlist_path', None)
+        source_lib_name = kwargs.pop('source_lib_name', lib_name)
+        source_cell_name = kwargs.pop('source_cell_name', cell_name)
 
         # If not provided the gds layout, need to export layout
         if not gds_layout_path:
@@ -180,8 +183,26 @@ class Calibre(VirtuosoChecker):
             copy_cmd = ['cp', gds_layout_path, os.path.abspath(lay_file)]
             flow_list.append((copy_cmd, copy_log_file, None, None, _all_pass))
 
-        cmd, log, env, cwd = self.setup_export_schematic(lib_name, cell_name, sch_file, sch_view, None)
-        flow_list.append((cmd, log, env, cwd, _all_pass))
+        if source_netlist_path:
+            if not os.path.exists(source_netlist_path):
+                raise ValueError(
+                    'source_netlist_path does not exist: {}'
+                    .format(source_netlist_path)
+                )
+            with open_temp(prefix='copySource', dir=run_dir, delete=True) as f:
+                copy_log_file = f.name
+            copy_cmd = [
+                'cp', os.path.abspath(source_netlist_path),
+                os.path.abspath(sch_file),
+            ]
+            flow_list.append(
+                (copy_cmd, copy_log_file, None, None, _all_pass)
+            )
+        else:
+            cmd, log, env, cwd = self.setup_export_schematic(
+                lib_name, cell_name, sch_file, sch_view, None
+            )
+            flow_list.append((cmd, log, env, cwd, _all_pass))
 
         lvs_params_actual = self.default_lvs_params.copy()
         if params is not None:
@@ -191,8 +212,12 @@ class Calibre(VirtuosoChecker):
             log_file = logf.name
 
         # generate new runset
-        runset_content = self.modify_lvs_runset(run_dir, lib_name, cell_name, lay_view, lay_file,
-                                                sch_file, lvs_params_actual)
+        runset_content = self.modify_lvs_runset(
+            run_dir, lib_name, cell_name, lay_view, lay_file,
+            sch_file, lvs_params_actual,
+            source_lib_name=source_lib_name,
+            source_cell_name=source_cell_name,
+        )
 
         # save runset
         with open_temp(dir=run_dir, delete=False) as runset_file:
@@ -357,7 +382,8 @@ class Calibre(VirtuosoChecker):
         return lay_file, sch_file
 
     def modify_lvs_runset(self, run_dir, lib_name, cell_name, lay_view, gds_file, netlist,
-                          lvs_params):
+                          lvs_params, source_lib_name=None,
+                          source_cell_name=None):
         # type: (str, str, str, str, str, str, Dict[str, Any]) -> str
         """Modify the given LVS runset file.
 
@@ -397,8 +423,8 @@ class Calibre(VirtuosoChecker):
         lvs_options['lvsLayoutLibrary'] = lib_name
         lvs_options['lvsLayoutView'] = lay_view
         lvs_options['lvsSourcePath'] = netlist
-        lvs_options['lvsSourcePrimary'] = cell_name
-        lvs_options['lvsSourceLibrary'] = lib_name
+        lvs_options['lvsSourcePrimary'] = source_cell_name or cell_name
+        lvs_options['lvsSourceLibrary'] = source_lib_name or lib_name
         lvs_options['lvsSpiceFile'] = os.path.join(run_dir, '%s.sp' % cell_name)
         lvs_options['lvsERCDatabase'] = '%s.erc.results' % cell_name
         lvs_options['lvsERCSummaryFile'] = '%s.erc.summary' % cell_name

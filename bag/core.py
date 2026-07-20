@@ -1340,6 +1340,29 @@ class BagProject(object):
             return False, ''
         return results[0]
 
+    def run_lvcdl(self, layout_lib_name, layout_cell_name,
+                  cdl_netlist_path=None, source_lib_name=None,
+                  source_cell_name=None, **kwargs):
+        """Run LVS using a concrete CDL file as the source netlist."""
+        if self.impl_db is None:
+            raise Exception('BAG Server is not set up.')
+        if cdl_netlist_path is None:
+            resolver = getattr(
+                self.impl_db, 'get_implementation_path', None
+            )
+            if resolver is None:
+                raise ValueError(
+                    'cdl_netlist_path is required by this database backend.'
+                )
+            cdl_netlist_path = resolver(
+                source_lib_name or layout_lib_name,
+                source_cell_name or layout_cell_name,
+            )
+        kwargs['source_netlist_path'] = cdl_netlist_path
+        kwargs['source_lib_name'] = source_lib_name or layout_lib_name
+        kwargs['source_cell_name'] = source_cell_name or layout_cell_name
+        return self.run_lvs(layout_lib_name, layout_cell_name, **kwargs)
+
     def run_rcx(self,  # type: BagProject
                 lib_name,  # type: str
                 cell_name,  # type: str
@@ -1479,6 +1502,34 @@ class BagProject(object):
             raise Exception('BAG Server is not set up.')
 
         return await self.impl_db.async_run_lvs(lib_name, cell_name, **kwargs)
+
+    async def async_run_lvcdl(
+            self, layout_lib_name: str, layout_cell_name: str,
+            cdl_netlist_path: Optional[str] = None,
+            source_lib_name: Optional[str] = None,
+            source_cell_name: Optional[str] = None,
+            **kwargs: Any) -> Tuple[bool, str]:
+        """Asynchronously run LVS using a concrete CDL source file."""
+        if self.impl_db is None:
+            raise Exception('BAG Server is not set up.')
+        if cdl_netlist_path is None:
+            resolver = getattr(
+                self.impl_db, 'get_implementation_path', None
+            )
+            if resolver is None:
+                raise ValueError(
+                    'cdl_netlist_path is required by this database backend.'
+                )
+            cdl_netlist_path = resolver(
+                source_lib_name or layout_lib_name,
+                source_cell_name or layout_cell_name,
+            )
+        kwargs['source_netlist_path'] = cdl_netlist_path
+        kwargs['source_lib_name'] = source_lib_name or layout_lib_name
+        kwargs['source_cell_name'] = source_cell_name or layout_cell_name
+        return await self.impl_db.async_run_lvs(
+            layout_lib_name, layout_cell_name, **kwargs
+        )
 
     async def async_run_rcx(self,  # type: BagProject
                             lib_name: str,

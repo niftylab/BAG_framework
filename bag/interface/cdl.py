@@ -45,6 +45,9 @@ class CdlInterface(NetlistInterface):
         self._writer = CdlWriter(
             extension=output_config.get('extension', '.sp'),
             line_length=output_config.get('line_length', 100),
+            primitive_wrappers=output_config.get(
+                'primitive_wrappers', {}
+            ),
         )
         template_config = cdl_config.get('template', {})
         self._template_writer = CdlTemplateWriter(
@@ -222,6 +225,29 @@ class CdlInterface(NetlistInterface):
                 )
             )
         return output_files
+
+    def get_implementation_path(self, lib_name, cell_name,
+                                require_exists=True):
+        """Return the concrete CDL path generated for one implementation."""
+        if (
+                not cell_name
+                or os.path.basename(cell_name) != cell_name):
+            raise ValueError(
+                'Implementation cell name cannot contain path separators.'
+            )
+        library_path = self._implementation_paths.get(
+            lib_name,
+            os.path.join(self.default_lib_path, lib_name),
+        )
+        output_file = os.path.abspath(os.path.join(
+            library_path, cell_name + self._writer.extension
+        ))
+        if require_exists and not os.path.isfile(output_file):
+            raise ValueError(
+                'CDL implementation {}/{} has not been generated: {}'
+                .format(lib_name, cell_name, output_file)
+            )
+        return output_file
 
     def delete_cellviews(self, lib_name, cell_view_list):
         """Delete generated CDL files for schematic-like cell views."""

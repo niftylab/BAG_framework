@@ -83,7 +83,8 @@ def _format_parameter_value(value):
 class CdlWriter(object):
     """Apply BAG schematic changes and write concrete CDL subcircuits."""
 
-    def __init__(self, extension='.sp', line_length=100):
+    def __init__(self, extension='.sp', line_length=100,
+                 primitive_wrappers=None):
         if (
                 not isinstance(extension, str)
                 or not extension.startswith('.')
@@ -95,6 +96,7 @@ class CdlWriter(object):
             raise ValueError('CDL line_length must be at least 40.')
         self.extension = extension
         self.line_length = line_length
+        self.primitive_wrappers = dict(primitive_wrappers or {})
 
     def write_cell(self, output_dir, impl_lib, template_cell, impl_cell,
                    change):
@@ -123,6 +125,17 @@ class CdlWriter(object):
                 template_cell.lib_name, template_cell.cell_name
             ),
         ]
+        if self.primitive_wrappers:
+            lines.append('')
+            for key, wrapper in self.primitive_wrappers.items():
+                wrapper_cell = key.split('/', 1)[-1]
+                terminals = wrapper.get('terminals', [])
+                lines.append('.SUBCKT {} {}'.format(
+                    wrapper_cell, ' '.join(terminals)
+                ).rstrip())
+                lines.append(wrapper['body'])
+                lines.append('.ENDS {}'.format(wrapper_cell))
+                lines.append('')
         for child_cell in child_cells:
             lines.append(
                 '.include "{}{}"'.format(child_cell, self.extension)
@@ -206,12 +219,37 @@ class CdlWriter(object):
         return _PININFO_CODES[direction]
 
     def _get_instances(self, impl_lib, impl_cell, template_cell, change):
-        instance_changes = _ordered_items(
+        raw_instance_changes = _ordered_items(
             change.get('inst_list', []), 'instance change'
         )
-        unknown_instances = sorted(
-            set(instance_changes.keys()) - set(template_cell.instances.keys())
-        )
+        instance_changes = OrderedDict()
+        unknown_instances = []
+        for change_name, replacements in raw_instance_changes.items():
+            template_name = change_name
+            if template_name not in template_cell.instances:
+                aliases = [
+                    name for name in template_cell.instances
+                    if name[1:] == change_name
+                ]
+                if len(aliases) == 1:
+                    template_name = aliases[0]
+                elif self._is_bag_pin_symbol(change_name, replacements):
+                    continue
+                else:
+                    unknown_instances.append(change_name)
+                    continue
+
+            element_type = template_cell.instances[template_name].element_type
+            normalized_replacements = []
+            for replacement in replacements:
+                replacement = dict(replacement)
+                name = replacement.get('name')
+                if name and not name.upper().startswith(element_type):
+                    replacement['name'] = element_type + name
+                normalized_replacements.append(replacement)
+            instance_changes[template_name] = normalized_replacements
+
+        unknown_instances = sorted(unknown_instances)
         if unknown_instances:
             raise ValueError(
                 'Instance changes reference unknown template instances: {}.'
@@ -242,6 +280,18 @@ class CdlWriter(object):
                     child_cells[child_cell] = None
 
         return lines, list(child_cells.keys())
+
+    @staticmethod
+    def _is_bag_pin_symbol(change_name, replacements):
+        """Return True for schematic-only ipin/opin/iopin instances."""
+        if not replacements:
+            return change_name.upper().startswith('PIN')
+        pin_cells = {'ipin', 'opin', 'iopin', 'sympin'}
+        return all(
+            replacement.get('lib_name') == 'basic'
+            and replacement.get('cell_name') in pin_cells
+            for replacement in replacements
+        )
 
     def _render_instance(self, impl_lib, impl_cell, template_instance,
                          replacement):
@@ -288,10 +338,31 @@ class CdlWriter(object):
             )
         )
 
+        wrapper = self.primitive_wrappers.get(
+            '{}/{}'.format(lib_name, cell_name)
+        )
+        if wrapper is None:
+            terminals = template_instance.terminals
+        else:
+            terminals = wrapper.get('terminals', [])
+            unknown_wrapper_terminals = sorted(
+                set(terminals) - set(connections)
+            )
+            if unknown_wrapper_terminals:
+                raise ValueError(
+                    'Primitive wrapper {}/{} references unknown terminals: {}.'
+                    .format(
+                        lib_name,
+                        cell_name,
+                        ', '.join(unknown_wrapper_terminals),
+                    )
+                )
+            name = 'X' + name[1:]
+
         tokens = [name]
         tokens.extend(
             _validate_identifier(connections[terminal], 'Net name')
-            for terminal in template_instance.terminals
+            for terminal in terminals
         )
         tokens.append(cell_name)
         for parameter, value in parameters.items():
