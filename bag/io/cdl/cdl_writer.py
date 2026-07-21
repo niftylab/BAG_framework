@@ -114,7 +114,7 @@ class CdlWriter(object):
             )
 
         pins, pin_info = self._get_pins(template_cell, change)
-        instance_lines, child_cells = self._get_instances(
+        instance_lines, child_cells, dependencies = self._get_instances(
             impl_lib, impl_cell, template_cell, change
         )
 
@@ -161,7 +161,34 @@ class CdlWriter(object):
             os.path.join(output_dir, impl_cell + self.extension)
         )
         write_file(output_file, '\n'.join(lines), mkdir=False)
+        dependency_file = self.get_dependency_path(output_file)
+        write_file(
+            dependency_file,
+            json.dumps(
+                {
+                    'schema': 'bag.cdl.dependencies.v1',
+                    'lib_name': impl_lib,
+                    'cell_name': impl_cell,
+                    'source': os.path.basename(output_file),
+                    'dependencies': [
+                        {
+                            'lib_name': lib_name,
+                            'cell_name': cell_name,
+                        }
+                        for lib_name, cell_name in dependencies
+                    ],
+                },
+                indent=2,
+                sort_keys=True,
+            ) + '\n',
+            mkdir=False,
+        )
         return output_file
+
+    @staticmethod
+    def get_dependency_path(output_file):
+        """Return the dependency sidecar path for one generated CDL file."""
+        return output_file + '.deps.json'
 
     def _get_pins(self, template_cell, change):
         pin_map = _ordered_items(change.get('pin_map', []), 'pin mapping')
@@ -258,6 +285,7 @@ class CdlWriter(object):
 
         lines = []
         child_cells = OrderedDict()
+        dependencies = OrderedDict()
         for old_name, template_instance in template_cell.instances.items():
             replacement_list = instance_changes.get(old_name)
             if replacement_list is None:
@@ -272,14 +300,20 @@ class CdlWriter(object):
                 ]
 
             for replacement in replacement_list:
-                statement, child_cell = self._render_instance(
+                statement, child_cell, dependency = self._render_instance(
                     impl_lib, impl_cell, template_instance, replacement
                 )
                 lines.extend(statement)
                 if child_cell is not None:
                     child_cells[child_cell] = None
+                if dependency is not None:
+                    dependencies[dependency] = None
 
-        return lines, list(child_cells.keys())
+        return (
+            lines,
+            list(child_cells.keys()),
+            list(dependencies.keys()),
+        )
 
     @staticmethod
     def _is_bag_pin_symbol(change_name, replacements):
@@ -372,12 +406,15 @@ class CdlWriter(object):
             )
 
         child_cell = None
+        dependency = None
         if (
                 template_instance.element_type == 'X'
                 and lib_name == impl_lib
                 and cell_name != impl_cell):
             child_cell = cell_name
-        return self._wrap_tokens(tokens), child_cell
+        if template_instance.element_type == 'X' and wrapper is None:
+            dependency = (lib_name, cell_name)
+        return self._wrap_tokens(tokens), child_cell, dependency
 
     def _wrap_tokens(self, tokens):
         lines = []

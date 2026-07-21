@@ -13,6 +13,22 @@ of its subclasses.  Server-backed classes use the configured ``socket``.
 Local classes such as ``bag.interface.cdl.CdlInterface`` declare that
 they do not require a server and can be constructed without ``socket``.
 
+``CdlInterface`` writes a ``.deps.json`` sidecar next to each concrete
+CDL implementation.  The sidecar preserves child identities as
+``(lib_name, cell_name)`` pairs.  Call
+``create_lvcdl_bundle(lib_name, cell_name, bundle_root)`` to recursively
+collect these implementations into a top-specific bundle.  Bundle paths are
+library-qualified (``libs/<library>/<cell>.sp``), and ``top.sp`` includes
+each collected source once in dependency order.
+
+The bundle builder rejects missing child implementations, cyclic
+dependencies, incomplete ``X`` subcircuit references, and conflicting
+same-name ``.SUBCKT`` definitions from different libraries.  Identical
+duplicate definitions, such as generated primitive wrappers, are
+deduplicated.  Set ``database.cdl.external_subckts`` to a list of subcircuit
+names only when those definitions are supplied separately by the verification
+runset.
+
 database.schematic
 ------------------
 

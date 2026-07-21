@@ -12,6 +12,8 @@ database:
       - "${BAG_WORK_DIR}/netlists/logic_templates.sp"
     template_root: "${BAG_WORK_DIR}/BagModules"
     strict: true
+    # Subcircuits supplied by the Calibre runset instead of this CDL bundle.
+    external_subckts: []
     output:
       extension: ".sp"
       line_length: 100

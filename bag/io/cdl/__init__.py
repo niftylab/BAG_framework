@@ -4,6 +4,7 @@
 
 from .core import CdlParseError, NetlistCell, NetlistInstance, NetlistLibrary
 from .cdl import CdlParser
+from .bundle import CdlBundleBuilder
 from .cdl_writer import CdlTemplateWriter, CdlWriter
 from .schematic import load_schematic_library
 
@@ -13,6 +14,7 @@ __all__ = [
     'NetlistInstance',
     'NetlistLibrary',
     'CdlParser',
+    'CdlBundleBuilder',
     'CdlTemplateWriter',
     'CdlWriter',
     'load_schematic_library',

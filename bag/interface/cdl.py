@@ -8,7 +8,12 @@ import os
 
 import yaml
 
-from ..io.cdl import CdlParser, CdlTemplateWriter, CdlWriter
+from ..io.cdl import (
+    CdlBundleBuilder,
+    CdlParser,
+    CdlTemplateWriter,
+    CdlWriter,
+)
 from .netlist import NetlistInterface
 
 
@@ -61,6 +66,9 @@ class CdlInterface(NetlistInterface):
             os.path.abspath(os.path.expandvars(path))
             for path in cdl_config.get('source_files', [])
         ]
+        self._external_subckts = list(
+            cdl_config.get('external_subckts', [])
+        )
         self._cells = OrderedDict()
         self._implementation_paths = {}
         self._load_sources()
@@ -237,7 +245,7 @@ class CdlInterface(NetlistInterface):
         return output_files
 
     def get_implementation_path(self, lib_name, cell_name,
-                                require_exists=True):
+                                 require_exists=True):
         """Return the concrete CDL path generated for one implementation."""
         if (
                 not cell_name
@@ -259,6 +267,20 @@ class CdlInterface(NetlistInterface):
             )
         return output_file
 
+    def create_lvcdl_bundle(self, lib_name, cell_name, bundle_root):
+        """Build a top-specific, library-qualified LVCDL source bundle."""
+        builder = CdlBundleBuilder(
+            source_resolver=lambda child_lib, child_cell:
+            self.get_implementation_path(
+                child_lib,
+                child_cell,
+                require_exists=False,
+            ),
+            extension=self._writer.extension,
+            external_subckts=self._external_subckts,
+        )
+        return builder.build(lib_name, cell_name, bundle_root)
+
     def delete_cellviews(self, lib_name, cell_view_list):
         """Delete generated CDL files for schematic-like cell views."""
         library_path = self._implementation_paths.get(
@@ -279,3 +301,6 @@ class CdlInterface(NetlistInterface):
             )
             if os.path.isfile(output_file):
                 os.remove(output_file)
+            dependency_file = self._writer.get_dependency_path(output_file)
+            if os.path.isfile(dependency_file):
+                os.remove(dependency_file)

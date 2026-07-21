@@ -216,11 +216,14 @@ def test_cdl_writer_output_options_and_validation(tmp_path):
     output = output_file.read_text(encoding='utf-8')
     assert '\n+ ' in output
     assert '.ENDS inv_wrapped' in output
+    dependency_file = Path(str(output_file) + '.deps.json')
+    assert dependency_file.is_file()
 
     interface.delete_cellviews(
         'logic_generated', [('inv_wrapped', 'schematic')]
     )
     assert not output_file.exists()
+    assert not dependency_file.exists()
 
     with pytest.raises(ValueError, match='unknown terminals'):
         interface.instantiate_schematic(
@@ -487,3 +490,178 @@ def test_cdl_interface_returns_generated_netlist_path(tmp_path):
     ) == output_files[0]
     with pytest.raises(ValueError, match='has not been generated'):
         interface.get_implementation_path('logic_generated', 'missing')
+
+
+def test_cdl_interface_builds_library_qualified_lvcdl_bundle(tmp_path):
+    output_root = tmp_path / 'generated_netlists'
+    output_root.mkdir()
+    interface = CdlInterface(
+        None, make_config(DATA_DIR / 'buffer2.sp', output_root)
+    )
+
+    interface.create_implementation(
+        'logic_generated',
+        [('logic_templates', 'inv', 'inv_2x')],
+        [dict(
+            name='inv_2x',
+            pin_map={},
+            inst_list=[],
+            new_pins=[],
+        )],
+    )
+    interface.create_implementation(
+        'adc_generated',
+        [('logic_templates', 'buffer2', 'adc_top')],
+        [dict(
+            name='adc_top',
+            pin_map={},
+            inst_list={
+                'XINV0': [{
+                    'name': 'XINV0',
+                    'lib_name': 'logic_generated',
+                    'cell_name': 'inv_2x',
+                    'params': {},
+                    'term_mapping': {},
+                }],
+                'XINV1': [],
+            },
+            new_pins=[],
+        )],
+    )
+
+    bundle_top = Path(interface.create_lvcdl_bundle(
+        'adc_generated',
+        'adc_top',
+        tmp_path / 'bundles',
+    ))
+    bundle_dir = tmp_path / 'bundles' / 'adc_generated' / 'adc_top'
+    copied_top = bundle_dir / 'libs' / 'adc_generated' / 'adc_top.sp'
+    copied_child = (
+        bundle_dir / 'libs' / 'logic_generated' / 'inv_2x.sp'
+    )
+
+    assert bundle_top == bundle_dir / 'top.sp'
+    assert copied_top.is_file()
+    assert copied_child.is_file()
+    assert bundle_top.read_text(encoding='utf-8').splitlines() == [
+        '* BAG LVCDL library-qualified source bundle',
+        '.include "libs/logic_generated/inv_2x.sp"',
+        '.include "libs/adc_generated/adc_top.sp"',
+    ]
+    assert '.include' not in copied_top.read_text(encoding='utf-8').lower()
+
+    manifest = yaml.safe_load(
+        (bundle_dir / 'manifest.json').read_text(encoding='utf-8')
+    )
+    assert manifest['top'] == {
+        'lib_name': 'adc_generated',
+        'cell_name': 'adc_top',
+        'path': 'libs/adc_generated/adc_top.sp',
+    }
+    assert [
+        (entry['lib_name'], entry['cell_name'])
+        for entry in manifest['cells']
+    ] == [
+        ('logic_generated', 'inv_2x'),
+        ('adc_generated', 'adc_top'),
+    ]
+    assert manifest['preflight']['missing_subckts'] == []
+
+
+def test_cdl_interface_bundle_rejects_missing_cross_library_child(tmp_path):
+    output_root = tmp_path / 'generated_netlists'
+    output_root.mkdir()
+    interface = CdlInterface(
+        None, make_config(DATA_DIR / 'buffer2.sp', output_root)
+    )
+    interface.create_implementation(
+        'adc_generated',
+        [('logic_templates', 'buffer2', 'adc_top')],
+        [dict(
+            name='adc_top',
+            pin_map={},
+            inst_list={
+                'XINV0': [{
+                    'name': 'XINV0',
+                    'lib_name': 'logic_generated',
+                    'cell_name': 'missing_inv',
+                    'params': {},
+                    'term_mapping': {},
+                }],
+                'XINV1': [],
+            },
+            new_pins=[],
+        )],
+    )
+
+    with pytest.raises(
+            ValueError,
+            match='logic_generated/missing_inv.*has not been generated'):
+        interface.create_lvcdl_bundle(
+            'adc_generated',
+            'adc_top',
+            tmp_path / 'bundles',
+        )
+
+
+def test_cdl_interface_bundle_rejects_cross_library_subckt_collision(
+        tmp_path):
+    output_root = tmp_path / 'generated_netlists'
+    output_root.mkdir()
+    interface = CdlInterface(
+        None, make_config(DATA_DIR / 'buffer2.sp', output_root)
+    )
+    interface.create_implementation(
+        'first_generated',
+        [('logic_templates', 'inv', 'shared')],
+        [dict(
+            name='shared',
+            pin_map={},
+            inst_list=[],
+            new_pins=[],
+        )],
+    )
+    interface.create_implementation(
+        'second_generated',
+        [('logic_templates', 'inv', 'shared')],
+        [dict(
+            name='shared',
+            pin_map={'OUT': 'Z'},
+            inst_list=[],
+            new_pins=[],
+        )],
+    )
+    interface.create_implementation(
+        'top_generated',
+        [('logic_templates', 'buffer2', 'collision_top')],
+        [dict(
+            name='collision_top',
+            pin_map={},
+            inst_list={
+                'XINV0': [{
+                    'name': 'XINV0',
+                    'lib_name': 'first_generated',
+                    'cell_name': 'shared',
+                    'params': {},
+                    'term_mapping': {},
+                }],
+                'XINV1': [{
+                    'name': 'XINV1',
+                    'lib_name': 'second_generated',
+                    'cell_name': 'shared',
+                    'params': {},
+                    'term_mapping': {},
+                }],
+            },
+            new_pins=[],
+        )],
+    )
+
+    with pytest.raises(
+            ValueError,
+            match=r'Conflicting \.SUBCKT shared definitions'):
+        interface.create_lvcdl_bundle(
+            'top_generated',
+            'collision_top',
+            tmp_path / 'bundles',
+        )
