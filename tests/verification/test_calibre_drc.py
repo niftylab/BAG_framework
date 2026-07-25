@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,8 @@ def _make_checker(tmp_path):
     checker = object.__new__(Calibre)
     checker.drc_run_dir = str(tmp_path / 'workspace' / 'rundir_drc')
     checker.drc_runset = str(runset)
+    checker.drc_policy_file = None
+    checker.drc_policy_profile = None
     checker.setup_export_layout = lambda *args: (
         ['export-layout'], str(tmp_path / 'layout.log'), None, None
     )
@@ -104,6 +107,136 @@ def test_drc_passed_keeps_execution_log_on_tool_or_summary_failure(tmp_path):
         False,
         str(log_path),
     )
+
+
+def test_drc_policy_waives_known_rules_and_writes_audit_result(tmp_path):
+    log_path = tmp_path / 'calibre.log'
+    log_path.write_text('calibre output\n', encoding='utf-8')
+    summary_path = tmp_path / 'cell.drc.summary'
+    summary_path.write_text(
+        'RULECHECK PP.W.1 ........ TOTAL Result Count = 0 (0)\n'
+        'RULECHECK PP.W.1 ........ TOTAL Result Count = 2 (2)\n'
+        'RULECHECK LDN.EX.2 ...... TOTAL Result Count = 3 (3)\n'
+        'TOTAL DRC Results Generated: 5 (5)\n',
+        encoding='utf-8',
+    )
+    policy_path = tmp_path / 'drc_policy.yaml'
+    policy_path.write_text(
+        'version: 1\n'
+        'profiles:\n'
+        '  bag_cell:\n'
+        '    scope:\n'
+        '      runsets: [drc.cell.runset]\n'
+        '      libraries: ["*_generated"]\n'
+        '    waive:\n'
+        '      - rule: PP.W.1\n'
+        '        reason: resolved by parent-level well merge\n'
+        '      - rule: LDN.EX.2\n'
+        '        reason: resolved by parent-level boundary\n',
+        encoding='utf-8',
+    )
+
+    assert drc_passed(
+        0,
+        str(log_path),
+        str(summary_path),
+        policy_file=str(policy_path),
+        policy_profile='bag_cell',
+        runset_file='/pdk/drc.cell.runset',
+        lib_name='logic_generated',
+        cell_name='inv_2x',
+        run_dir=str(tmp_path),
+    ) == (True, str(log_path))
+
+    result = json.loads(
+        (tmp_path / 'drc_policy_result.json').read_text(encoding='utf-8')
+    )
+    assert result['raw_violation_count'] == 5
+    assert result['waived_violation_count'] == 5
+    assert result['remaining_violation_count'] == 0
+    assert result['raw_passed'] is False
+    assert result['policy_passed'] is True
+    assert result['waived_rules'] == {'LDN.EX.2': 3, 'PP.W.1': 2}
+
+
+def test_drc_policy_fails_on_unknown_or_out_of_scope_rules(tmp_path):
+    log_path = tmp_path / 'calibre.log'
+    log_path.write_text('calibre output\n', encoding='utf-8')
+    summary_path = tmp_path / 'cell.drc.summary'
+    summary_path.write_text(
+        'RULECHECK PP.W.1 ........ TOTAL Result Count = 2\n'
+        'RULECHECK NEW.RULE ...... TOTAL Result Count = 1\n'
+        'TOTAL DRC Results Generated: 3\n',
+        encoding='utf-8',
+    )
+    policy_path = tmp_path / 'drc_policy.yaml'
+    policy_path.write_text(
+        'version: 1\n'
+        'profiles:\n'
+        '  bag_cell:\n'
+        '    scope:\n'
+        '      runsets: [drc.cell.runset]\n'
+        '      libraries: ["*_generated"]\n'
+        '    waive:\n'
+        '      - rule: PP.W.1\n'
+        '        reason: parent-level well merge\n',
+        encoding='utf-8',
+    )
+
+    result = drc_passed(
+        0,
+        str(log_path),
+        str(summary_path),
+        policy_file=str(policy_path),
+        policy_profile='bag_cell',
+        runset_file='/pdk/drc.cell.runset',
+        lib_name='logic_generated',
+        cell_name='inv_2x',
+        run_dir=str(tmp_path),
+    )
+    assert result == (False, str(log_path))
+    audit = json.loads(
+        (tmp_path / 'drc_policy_result.json').read_text(encoding='utf-8')
+    )
+    assert audit['waived_rules'] == {'PP.W.1': 2}
+    assert audit['remaining_rules'] == {'NEW.RULE': 1}
+    assert audit['remaining_violation_count'] == 1
+
+    assert drc_passed(
+        0,
+        str(log_path),
+        str(summary_path),
+        policy_file=str(policy_path),
+        policy_profile='bag_cell',
+        runset_file='/pdk/drc.cell.runset',
+        lib_name='third_party_lib',
+        cell_name='inv_2x',
+        run_dir=str(tmp_path),
+    ) == (False, str(log_path))
+
+
+def test_drc_policy_configuration_error_fails_closed(tmp_path):
+    log_path = tmp_path / 'calibre.log'
+    log_path.write_text('calibre output\n', encoding='utf-8')
+    summary_path = tmp_path / 'cell.drc.summary'
+    summary_path.write_text(
+        'TOTAL DRC Results Generated: 0\n',
+        encoding='utf-8',
+    )
+
+    assert drc_passed(
+        0,
+        str(log_path),
+        str(summary_path),
+        policy_file=str(tmp_path / 'missing.yaml'),
+        policy_profile='bag_cell',
+        run_dir=str(tmp_path),
+    ) == (False, str(log_path))
+    result = json.loads(
+        (tmp_path / 'drc_policy_result.json').read_text(encoding='utf-8')
+    )
+    assert result['policy_passed'] is False
+    assert 'error' in result
 
 
 @pytest.mark.parametrize('checker_cls', [PVS, ICV])
