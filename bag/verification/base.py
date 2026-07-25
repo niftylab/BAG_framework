@@ -78,6 +78,13 @@ class Checker(abc.ABC):
         """
         return False, ''
 
+    async def async_run_drc(self, lib_name, cell_name):
+        # type: (str, str) -> Tuple[bool, str]
+        """A coroutine for running DRC."""
+        raise NotImplementedError(
+            '{} does not support DRC.'.format(type(self).__name__)
+        )
+
     @abc.abstractmethod
     async def async_run_rcx(self, lib_name, cell_name, sch_view='schematic',
                             lay_view='layout', params=None, **kwargs):
@@ -238,6 +245,13 @@ class SubProcessChecker(Checker, abc.ABC):
         """
         return []
 
+    def setup_drc_flow(self, lib_name, cell_name):
+        # type: (str, str) -> Sequence[FlowInfo]
+        """Configure a DRC subprocess flow."""
+        raise NotImplementedError(
+            '{} does not support DRC.'.format(type(self).__name__)
+        )
+
     @abc.abstractmethod
     def setup_rcx_flow(self, lib_name, cell_name, sch_view='schematic',
                        lay_view='layout', params=None, **kwargs):
@@ -352,6 +366,11 @@ class SubProcessChecker(Checker, abc.ABC):
                             ) -> Tuple[bool, str]:
 
         flow_info = self.setup_lvs_flow(lib_name, cell_name, sch_view, lay_view, params, **kwargs)
+        return await self._manager.async_new_subprocess_flow(flow_info)
+
+    async def async_run_drc(self, lib_name: str,
+                            cell_name: str) -> Tuple[bool, str]:
+        flow_info = self.setup_drc_flow(lib_name, cell_name)
         return await self._manager.async_new_subprocess_flow(flow_info)
 
     async def async_run_rcx(self, lib_name: str, cell_name: str,

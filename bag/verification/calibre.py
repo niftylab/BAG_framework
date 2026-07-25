@@ -6,6 +6,7 @@
 from typing import TYPE_CHECKING, Optional, List, Tuple, Dict, Any, Sequence
 
 import os
+import re
 import subprocess
 import shutil
 
@@ -51,6 +52,25 @@ def lvs_passed(retcode, log_file):
 
 
 # noinspection PyUnusedLocal
+def drc_passed(retcode, log_file, summary_file):
+    # type: (int, str, str) -> Tuple[bool, str]
+    """Check whether Calibre DRC completed with no generated violations."""
+    if retcode != 0 or not os.path.isfile(summary_file):
+        return False, log_file
+
+    content = read_file(summary_file)
+    matches = re.findall(
+        r'TOTAL\s+(?:DRC\s+)?RESULTS?\s+GENERATED\s*[:=]\s*(\d+)',
+        content,
+        flags=re.IGNORECASE,
+    )
+    if not matches:
+        return False, log_file
+
+    return int(matches[-1]) == 0, log_file
+
+
+# noinspection PyUnusedLocal
 def query_passed(retcode, log_file):
     # type: (int, str) -> Tuple[bool, str]
     """Check if query passed
@@ -90,6 +110,10 @@ class Calibre(VirtuosoChecker):
         the LVS run directory.
     lvs_runset : str
         the LVS runset filename.
+    drc_run_dir : str
+        the DRC run directory.
+    drc_runset : str
+        the DRC runset filename.
     rcx_run_dir : str
         the RCX run directory.
     rcx_runset : str
@@ -105,7 +129,7 @@ class Calibre(VirtuosoChecker):
 
     def __init__(self, tmp_dir, lvs_run_dir, lvs_runset, rcx_run_dir, rcx_runset,
                  source_added_file='$DK/Calibre/lvs/source.added', rcx_mode='pex',
-                 xact_rules='', **kwargs):
+                 xact_rules='', drc_run_dir=None, drc_runset=None, **kwargs):
 
         max_workers = kwargs.get('max_workers', None)
         cancel_timeout = kwargs.get('cancel_timeout_ms', None)
@@ -122,6 +146,10 @@ class Calibre(VirtuosoChecker):
         self.default_lvs_params = lvs_params
         self.lvs_run_dir = os.path.abspath(rcx_run_dir if (rcx_mode == 'starrc' or rcx_mode == 'qrc') else lvs_run_dir)
         self.lvs_runset = lvs_runset
+        self.drc_run_dir = (
+            os.path.abspath(drc_run_dir) if drc_run_dir else None
+        )
+        self.drc_runset = drc_runset
         self.rcx_run_dir = os.path.abspath(rcx_run_dir)
         self.rcx_runset = rcx_runset
         self.rcx_link_files = rcx_link_files
@@ -152,6 +180,47 @@ class Calibre(VirtuosoChecker):
                     # '%s.pex.netlist.pex' % cell_name,
                     # '%s.pex.netlist.%s.pxi' % (cell_name, cell_name),
                     ]
+
+    def setup_drc_flow(self, lib_name, cell_name):
+        # type: (str, str) -> Sequence[FlowInfo]
+        if not self.drc_run_dir or not self.drc_runset:
+            raise ValueError(
+                'Calibre DRC requires drc_run_dir and drc_runset.'
+            )
+
+        run_dir = os.path.join(self.drc_run_dir, lib_name, cell_name)
+        os.makedirs(run_dir, exist_ok=True)
+        lay_file = os.path.join(run_dir, 'layout.gds')
+
+        cmd, log_file, env, cwd = self.setup_export_layout(
+            lib_name, cell_name, lay_file, 'layout', None
+        )
+        flow_list = [(cmd, log_file, env, cwd, _all_pass)]
+
+        summary_name = '%s.drc.summary' % cell_name
+        summary_file = os.path.join(run_dir, summary_name)
+        with open_temp(prefix='drcLog', dir=run_dir, delete=False) as logf:
+            drc_log_file = logf.name
+
+        runset_content = self.modify_drc_runset(
+            run_dir, lib_name, cell_name, lay_file
+        )
+        with open_temp(
+                prefix='drcRunset', dir=run_dir, delete=False) as runset_file:
+            runset_fname = runset_file.name
+            runset_file.write(runset_content)
+
+        cmd = ['calibre', '-gui', '-drc', '-runset', runset_fname, '-batch']
+        flow_list.append(
+            (
+                cmd,
+                drc_log_file,
+                None,
+                run_dir,
+                lambda rc, lf: drc_passed(rc, lf, summary_file),
+            )
+        )
+        return flow_list
 
     def setup_lvs_flow(self, lib_name, cell_name, sch_view='schematic', lay_view='layout',
                        params=None, **kwargs):
@@ -392,6 +461,36 @@ class Calibre(VirtuosoChecker):
         lay_file = os.path.join(run_dir, 'layout.gds')
         sch_file = os.path.join(run_dir, 'schematic.net')
         return lay_file, sch_file
+
+    def modify_drc_runset(self, run_dir, lib_name, cell_name, gds_file):
+        # type: (str, str, str, str) -> str
+        """Return a cell-specific Calibre DRC runset."""
+        drc_options = {}
+        for line in readlines_iter(self.drc_runset):
+            key, val = line.split(':', 1)
+            key = key.strip('*')
+            drc_options[key] = val.strip()
+
+        rules_file = drc_options.get('drcRulesFile')
+        if rules_file and not os.path.isabs(rules_file):
+            drc_options['drcRulesFile'] = os.path.normpath(
+                os.path.join(self.drc_run_dir, rules_file)
+            )
+
+        drc_options['drcRunDir'] = run_dir
+        drc_options['drcLayoutPaths'] = gds_file
+        drc_options['drcLayoutPrimary'] = cell_name
+        drc_options['drcLayoutLibrary'] = lib_name
+        drc_options['drcLayoutView'] = 'layout'
+        drc_options['drcResultsFile'] = '%s.drc.results' % cell_name
+        drc_options['drcSummaryFile'] = '%s.drc.summary' % cell_name
+        drc_options['cmnFDILayoutLibrary'] = lib_name
+        drc_options['cmnFDILayoutView'] = 'layout'
+        drc_options['cmnFDIDEFLayoutPath'] = '%s.def' % cell_name
+
+        return ''.join(
+            ('*%s: %s\n' % (key, val) for key, val in drc_options.items())
+        )
 
     def modify_lvs_runset(self, run_dir, lib_name, cell_name, lay_view, gds_file, netlist,
                           lvs_params, source_lib_name=None,

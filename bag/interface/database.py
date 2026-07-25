@@ -461,6 +461,14 @@ class DbAccess(InterfaceBase, abc.ABC):
         else:
             return netlist, log_fname
 
+    async def async_run_drc(self, lib_name: str,
+                            cell_name: str) -> Tuple[bool, str]:
+        """A coroutine for running DRC."""
+        if self.checker is None:
+            raise Exception('DRC is disabled.')
+
+        return await self.checker.async_run_drc(lib_name, cell_name)
+
     async def async_run_lvs(self, lib_name: str, cell_name: str, **kwargs: Any) -> Tuple[bool, str]:
         """A coroutine for running LVS.
 
