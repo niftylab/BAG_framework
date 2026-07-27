@@ -53,6 +53,37 @@ def lvs_passed(retcode, log_file):
     return stdout.decode() != '', log_file
 
 
+def _format_calibre_runset_value(value):
+    # type: (Any) -> str
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    if isinstance(value, (list, tuple)):
+        return '[ {} ]'.format(
+            ', '.join(json.dumps(item) for item in value)
+        )
+    if isinstance(value, (int, float)):
+        return str(value)
+    return json.dumps(value)
+
+
+def _replace_calibre_runset_assignment(content, key, value):
+    # type: (str, str, Any) -> str
+    pattern = re.compile(
+        r'^(\s*{}\s*=\s*).*$'.format(re.escape(key)),
+        flags=re.MULTILINE,
+    )
+    content, count = pattern.subn(
+        lambda match: match.group(1) + _format_calibre_runset_value(value),
+        content,
+    )
+    if count != 1:
+        raise ValueError(
+            'Expected one assignment for {!r} in modern Calibre runset; '
+            'found {}.'.format(key, count)
+        )
+    return content
+
+
 # noinspection PyUnusedLocal
 def _drc_rule_counts(content):
     # type: (str) -> Dict[str, int]
@@ -695,9 +726,64 @@ class Calibre(VirtuosoChecker):
         content : str
             the new runset content.
         """
-        # convert runset content to dictionary
+        runset_content = read_file(self.lvs_runset)
+        if re.search(r'^\s*lvs\.[A-Za-z0-9_.]+\s*=', runset_content,
+                     flags=re.MULTILINE):
+            source_lib_name = source_lib_name or lib_name
+            source_cell_name = source_cell_name or cell_name
+            spice_file = os.path.join(run_dir, '%s.sp' % cell_name)
+            replacements = {
+                'lvs.runDir.value': run_dir,
+                'lvs.layout.layoutFile.value': gds_file,
+                'cmn.layout.defFiles.value': ['%s.def' % cell_name],
+                'lvs.layout.topCellLibrary.value': lib_name,
+                'cmn.layout.topCellLibraryFDI.value': lib_name,
+                'lvs.layout.topCell.value': cell_name,
+                'lvs.layout.topCellView.value': lay_view,
+                'cmn.layout.topCellViewFDI.value': lay_view,
+                'lvs.layout.layoutNetlist.value': spice_file,
+                'lvs.source2.sourceFile.value': netlist,
+                'lvs.source2.topCellLibrary.value': source_lib_name,
+                'lvs.source2.topCellLibraryFDI.value': source_lib_name,
+                'lvs.source2.topCell.value': source_cell_name,
+                'lvs.source2.topCellFDI.value': source_cell_name,
+                'lvs.source.sourceFile.value': netlist,
+                'lvs.source.topCellLibrary.value': source_lib_name,
+                'lvs.source.topCellLibraryFDI.value': source_lib_name,
+                'lvs.source.topCell.value': source_cell_name,
+                'lvs.source.topCellFDI.value': source_cell_name,
+                'lvs.reports.lvsReport.value': '%s.lvs.report' % cell_name,
+                'lvs.ercdb.resultsFile.value': '%s.erc.results' % cell_name,
+                'lvs.ercSummaryReport.report.value':
+                    '%s.erc.summary' % cell_name,
+            }
+
+            legacy_to_modern = {
+                'lvsRunDir': 'lvs.runDir.value',
+                'lvsLayoutPaths': 'lvs.layout.layoutFile.value',
+                'lvsLayoutPrimary': 'lvs.layout.topCell.value',
+                'lvsLayoutLibrary': 'lvs.layout.topCellLibrary.value',
+                'lvsLayoutView': 'lvs.layout.topCellView.value',
+                'lvsSourcePath': 'lvs.source.sourceFile.value',
+                'lvsSourcePrimary': 'lvs.source.topCell.value',
+                'lvsSourceLibrary': 'lvs.source.topCellLibrary.value',
+                'lvsSpiceFile': 'lvs.layout.layoutNetlist.value',
+                'lvsERCDatabase': 'lvs.ercdb.resultsFile.value',
+                'lvsERCSummaryFile': 'lvs.ercSummaryReport.report.value',
+                'lvsReportFile': 'lvs.reports.lvsReport.value',
+            }
+            for key, value in lvs_params.items():
+                replacements[legacy_to_modern.get(key, key)] = value
+
+            for key, value in replacements.items():
+                runset_content = _replace_calibre_runset_assignment(
+                    runset_content, key, value
+                )
+            return runset_content
+
+        # convert legacy runset content to dictionary
         lvs_options = {}
-        for line in readlines_iter(self.lvs_runset):
+        for line in runset_content.splitlines():
             key, val = line.split(':', 1)
             key = key.strip('*')
             lvs_options[key] = val.strip()
