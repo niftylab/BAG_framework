@@ -133,7 +133,18 @@ def test_modify_lvs_runset_supports_modern_calibre_format(tmp_path):
     assert 'lvs.source.sourceFile.value = "{}"'.format(
         netlist.replace('\\', '\\\\')
     ) in content
+    spice_file = str(
+        tmp_path / 'runs' / 'layout_lib' / 'layout_top' / 'layout_top.sp'
+    )
+    assert 'lvs.layout.layoutNetlist.value = "{}"'.format(
+        spice_file.replace('\\', '\\\\')
+    ) in content
+    assert 'lvs.source2.sourceFile.value = "{}"'.format(
+        spice_file.replace('\\', '\\\\')
+    ) in content
     assert 'lvs.layout.topCell.value = "layout_top"' in content
+    assert 'lvs.source2.topCell.value = "layout_top"' in content
+    assert 'lvs.source2.topCellLibrary.value = "layout_lib"' in content
     assert 'lvs.source.topCell.value = "source_top"' in content
     assert 'lvs.source.topCellLibrary.value = "source_lib"' in content
     assert 'lvs.reports.lvsReport.value = "layout_top.lvs.report"' in content
