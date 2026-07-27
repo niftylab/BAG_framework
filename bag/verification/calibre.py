@@ -56,8 +56,16 @@ def lvs_passed(retcode, log_file):
 # noinspection PyUnusedLocal
 def _drc_rule_counts(content):
     # type: (str) -> Dict[str, int]
-    """Return the final Calibre result count for each RULECHECK."""
+    """Return top-level Calibre result counts for each RULECHECK."""
     counts = {}
+    by_cell = re.search(
+        r'^\s*-+\s*RULECHECK\s+RESULTS\s+STATISTICS\s*'
+        r'\(BY\s+CELL\)\s*$',
+        content,
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    if by_cell:
+        content = content[:by_cell.start()]
     pattern = re.compile(
         r'^\s*RULECHECK\s+(.+?)\s+(?:\.+\s*)?'
         r'TOTAL\s+Result\s+Count\s*=\s*(\d+)'

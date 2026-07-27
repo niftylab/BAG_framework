@@ -159,6 +159,56 @@ def test_drc_policy_waives_known_rules_and_writes_audit_result(tmp_path):
     assert result['waived_rules'] == {'LDN.EX.2': 3, 'PP.W.1': 2}
 
 
+def test_drc_policy_ignores_hierarchical_by_cell_rule_counts(tmp_path):
+    log_path = tmp_path / 'calibre.log'
+    log_path.write_text('calibre output\n', encoding='utf-8')
+    summary_path = tmp_path / 'cell.drc.summary'
+    summary_path.write_text(
+        '--- RULECHECK RESULTS STATISTICS\n'
+        'RULECHECK LUP.6 ......... TOTAL Result Count = 810 (810)\n'
+        'RULECHECK M2.S.7 ........ TOTAL Result Count = 4 (4)\n'
+        '--- RULECHECK RESULTS STATISTICS (BY CELL)\n'
+        '    RULECHECK LUP.6 ..... TOTAL Result Count = 234 (234)\n'
+        '    RULECHECK M2.S.7 .... TOTAL Result Count = 2 (2)\n'
+        'TOTAL DRC Results Generated: 814 (814)\n',
+        encoding='utf-8',
+    )
+    policy_path = tmp_path / 'drc_policy.yaml'
+    policy_path.write_text(
+        'version: 1\n'
+        'profiles:\n'
+        '  bag_cell:\n'
+        '    scope:\n'
+        '      runsets: [drc.cell.runset]\n'
+        '      libraries: ["*_generated"]\n'
+        '    waive:\n'
+        '      - rule: LUP.6\n'
+        '        reason: resolved by parent-level integration\n',
+        encoding='utf-8',
+    )
+
+    assert drc_passed(
+        0,
+        str(log_path),
+        str(summary_path),
+        policy_file=str(policy_path),
+        policy_profile='bag_cell',
+        runset_file='/pdk/drc.cell.runset',
+        lib_name='serializer_generated',
+        cell_name='shser_32to4_2x',
+        run_dir=str(tmp_path),
+    ) == (False, str(log_path))
+
+    result = json.loads(
+        (tmp_path / 'drc_policy_result.json').read_text(encoding='utf-8')
+    )
+    assert result['rule_counts'] == {'LUP.6': 810, 'M2.S.7': 4}
+    assert result['waived_rules'] == {'LUP.6': 810}
+    assert result['remaining_rules'] == {'M2.S.7': 4}
+    assert result['waived_violation_count'] == 810
+    assert result['remaining_violation_count'] == 4
+
+
 def test_drc_policy_fails_on_unknown_or_out_of_scope_rules(tmp_path):
     log_path = tmp_path / 'calibre.log'
     log_path.write_text('calibre output\n', encoding='utf-8')
