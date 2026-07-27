@@ -123,6 +123,9 @@ class PVS(VirtuosoChecker):
         # PVS generate schematic cellviews directly.
         return []
 
+    def setup_drc_flow(self, lib_name, cell_name):
+        raise NotImplementedError('PVS does not support DRC.')
+
     def setup_lvs_flow(self, lib_name, cell_name, sch_view='schematic', lay_view='layout',
                        params=None, **kwargs):
         # type: (str, str, str, str, Optional[Dict[str, Any]], Any) -> Sequence[FlowInfo]

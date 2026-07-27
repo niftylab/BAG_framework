@@ -1307,6 +1307,31 @@ class BagProject(object):
 
         self.impl_db.delete_cellviews(lib_name, cell_view_list)
 
+    def run_drc(self,  # type: BagProject
+                lib_name,  # type: str
+                cell_name,  # type: str
+                ):
+        # type: (...) -> Tuple[bool, str]
+        """Run DRC on the given cell.
+
+        Returns ``(passed, log_fname)``.  ``passed`` is True only when
+        the DRC run completes with no violations.
+        """
+        if self.impl_db is None:
+            raise Exception('BAG Server is not set up.')
+
+        coro = self.impl_db.async_run_drc(lib_name, cell_name)
+        results = batch_async_task([coro])
+        if results is None:
+            return False, ''
+
+        result = results[0]
+        if isinstance(result, NotImplementedError):
+            raise result
+        if isinstance(result, Exception):
+            return False, ''
+        return result
+
     def run_lvs(self,  # type: BagProject
                 lib_name,  # type: str
                 cell_name,  # type: str

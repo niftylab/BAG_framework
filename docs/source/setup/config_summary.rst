@@ -12,6 +12,7 @@ on the project is simulating the same corners, running LVS and extraction with t
 case, you should change the following fields to point to the global configuration files:
 
 * :ref:`sim_env_file`
+* :ref:`drc_runset`
 * :ref:`lvs_runset`
 * :ref:`rcx_runset`
 * :ref:`calibre_cellmap`
@@ -23,6 +24,7 @@ If you changed your Virtuoso setup (configuration files, working directory, etc.
 see if they need to be modified:
 
 * :ref:`lvs_rundir`
+* :ref:`drc_rundir`
 * :ref:`rcx_rundir`
 * :ref:`sim_init_file`
 

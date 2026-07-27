@@ -143,13 +143,21 @@ The default simulation environment name.  See :ref:`sim_env_file`.
 database.checker
 ----------------
 
-This entry contains all settings needed to run LVS/RCX from BAG.
+This entry contains all settings needed to run DRC/LVS/RCX from BAG.
 
 database.checker.checker_cls
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The Python class that handles LVS/RCX.  If you use Calibre with Virtuoso for LVS/RCX, the value must be
+The Python class that handles DRC/LVS/RCX.  If you use Calibre with Virtuoso, the value must be
 ``bag.verification.calibre.Calibre``.
+
+.. _drc_rundir:
+
+database.checker.drc_run_dir
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+DRC run directory.  Calibre DRC creates a separate subdirectory for each
+library and cell.
 
 .. _lvs_rundir:
 
@@ -171,6 +179,15 @@ database.checker.lvs_runset
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 LVS runset.
+
+.. _drc_runset:
+
+database.checker.drc_runset
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Calibre DRC runset used as the template for :meth:`bag.BagProject.run_drc`.
+The configured layout library, cell, exported GDS, result database, and
+summary paths are replaced for each invocation.
 
 .. _rcx_runset:
 

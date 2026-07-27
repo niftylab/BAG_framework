@@ -5,12 +5,15 @@
 
 from typing import TYPE_CHECKING, Optional, List, Tuple, Dict, Any, Sequence
 
+import fnmatch
+import json
 import os
+import re
 import subprocess
 import shutil
 
 from .virtuoso import VirtuosoChecker
-from ..io import read_file, open_temp, readlines_iter
+from ..io import read_file, read_yaml, open_temp, readlines_iter
 
 if TYPE_CHECKING:
     from .base import FlowInfo
@@ -48,6 +51,173 @@ def lvs_passed(retcode, log_file):
     stdout, stderr = LogCheck.communicate()
 
     return stdout.decode() != '', log_file
+
+
+# noinspection PyUnusedLocal
+def _drc_rule_counts(content):
+    # type: (str) -> Dict[str, int]
+    """Return the final Calibre result count for each RULECHECK."""
+    counts = {}
+    pattern = re.compile(
+        r'^\s*RULECHECK\s+(.+?)\s+(?:\.+\s*)?'
+        r'TOTAL\s+Result\s+Count\s*=\s*(\d+)'
+        r'(?:\s+\(\d+\))?\s*$',
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    for match in pattern.finditer(content):
+        counts[match.group(1).strip()] = int(match.group(2))
+    return counts
+
+
+def _matches_any(value, patterns):
+    # type: (str, Sequence[str]) -> bool
+    return any(fnmatch.fnmatchcase(value, pattern) for pattern in patterns)
+
+
+def _load_drc_waivers(policy_file, policy_profile, runset_file, lib_name):
+    # type: (str, str, str, str) -> Tuple[bool, Dict[str, str]]
+    policy = read_yaml(policy_file)
+    if not isinstance(policy, dict):
+        raise ValueError('DRC policy root must be a mapping.')
+    profiles = policy.get('profiles', {})
+    profile = profiles.get(policy_profile)
+    if not isinstance(profile, dict):
+        raise ValueError(
+            'DRC policy profile not found: {}'.format(policy_profile)
+        )
+
+    scope = profile.get('scope', {})
+    runsets = scope.get('runsets', ['*'])
+    libraries = scope.get('libraries', ['*'])
+    if not isinstance(runsets, list) or not isinstance(libraries, list):
+        raise ValueError('DRC policy scope runsets/libraries must be lists.')
+    runset_name = os.path.basename(runset_file) if runset_file else ''
+    in_scope = (
+        _matches_any(runset_name, runsets)
+        and _matches_any(lib_name or '', libraries)
+    )
+    if not in_scope:
+        return False, {}
+
+    waivers = {}
+    for entry in profile.get('waive', []):
+        if not isinstance(entry, dict) or not entry.get('rule'):
+            raise ValueError('Each DRC waiver requires a rule.')
+        reason = entry.get('reason')
+        if not reason:
+            raise ValueError(
+                'DRC waiver {} requires a reason.'.format(entry['rule'])
+            )
+        waivers[str(entry['rule'])] = str(reason)
+    return True, waivers
+
+
+# noinspection PyUnusedLocal
+def drc_passed(retcode, log_file, summary_file, policy_file=None,
+               policy_profile=None, runset_file=None, lib_name=None,
+               cell_name=None, run_dir=None):
+    # type: (int, str, str, Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]) -> Tuple[bool, str]
+    """Check Calibre DRC and optionally apply an auditable rule waiver policy."""
+    audit_dir = run_dir or os.path.dirname(summary_file)
+    audit_file = os.path.join(audit_dir, 'drc_policy_result.json')
+    result = {
+        'schema_version': 1,
+        'library': lib_name,
+        'cell': cell_name,
+        'runset': runset_file,
+        'summary_file': summary_file,
+        'execution_log': log_file,
+        'policy_file': policy_file,
+        'policy_profile': policy_profile,
+        'raw_passed': False,
+        'policy_passed': False,
+        'raw_violation_count': None,
+        'waived_violation_count': 0,
+        'remaining_violation_count': None,
+        'rule_counts': {},
+        'waived_rules': {},
+        'remaining_rules': {},
+    }
+
+    try:
+        if retcode != 0:
+            raise RuntimeError(
+                'Calibre DRC exited with status {}.'.format(retcode)
+            )
+        if not os.path.isfile(summary_file):
+            raise RuntimeError('Calibre DRC summary file is missing.')
+
+        content = read_file(summary_file)
+        matches = re.findall(
+            r'TOTAL\s+(?:DRC\s+)?RESULTS?\s+GENERATED\s*[:=]\s*(\d+)',
+            content,
+            flags=re.IGNORECASE,
+        )
+        if not matches:
+            raise RuntimeError(
+                'Calibre DRC total result count was not found.'
+            )
+
+        raw_count = int(matches[-1])
+        rule_counts = {
+            rule: count
+            for rule, count in _drc_rule_counts(content).items()
+            if count
+        }
+        result['raw_violation_count'] = raw_count
+        result['raw_passed'] = raw_count == 0
+        result['rule_counts'] = rule_counts
+
+        if bool(policy_file) != bool(policy_profile):
+            raise ValueError(
+                'Both drc_policy_file and drc_policy_profile are required.'
+            )
+
+        waivers = {}
+        in_scope = False
+        if policy_file:
+            in_scope, waivers = _load_drc_waivers(
+                policy_file, policy_profile, runset_file, lib_name
+            )
+        result['policy_in_scope'] = in_scope
+
+        waived_rules = {
+            rule: count
+            for rule, count in rule_counts.items()
+            if rule in waivers
+        }
+        remaining_rules = {
+            rule: count
+            for rule, count in rule_counts.items()
+            if rule not in waivers
+        }
+        waived_count = min(raw_count, sum(waived_rules.values()))
+        remaining_count = raw_count - waived_count
+        result['waived_rules'] = waived_rules
+        result['waiver_reasons'] = {
+            rule: waivers[rule] for rule in waived_rules
+        }
+        result['remaining_rules'] = remaining_rules
+        result['waived_violation_count'] = waived_count
+        result['remaining_violation_count'] = remaining_count
+        result['policy_passed'] = remaining_count == 0
+    except Exception as err:
+        result['error'] = '{}: {}'.format(type(err).__name__, err)
+        result['policy_passed'] = False
+
+    os.makedirs(audit_dir, exist_ok=True)
+    with open(audit_file, 'w', encoding='utf-8') as stream:
+        json.dump(result, stream, indent=2, sort_keys=True)
+        stream.write('\n')
+    if os.path.isfile(log_file):
+        with open(log_file, 'a', encoding='utf-8') as stream:
+            stream.write(
+                '\nBAG DRC policy result: {} (policy_passed={})\n'.format(
+                    audit_file, result['policy_passed']
+                )
+            )
+
+    return result['policy_passed'], log_file
 
 
 # noinspection PyUnusedLocal
@@ -90,6 +260,14 @@ class Calibre(VirtuosoChecker):
         the LVS run directory.
     lvs_runset : str
         the LVS runset filename.
+    drc_run_dir : str
+        the DRC run directory.
+    drc_runset : str
+        the DRC runset filename.
+    drc_policy_file : str
+        optional YAML policy containing scoped cell-level DRC waivers.
+    drc_policy_profile : str
+        profile name selected from ``drc_policy_file``.
     rcx_run_dir : str
         the RCX run directory.
     rcx_runset : str
@@ -105,7 +283,8 @@ class Calibre(VirtuosoChecker):
 
     def __init__(self, tmp_dir, lvs_run_dir, lvs_runset, rcx_run_dir, rcx_runset,
                  source_added_file='$DK/Calibre/lvs/source.added', rcx_mode='pex',
-                 xact_rules='', **kwargs):
+                 xact_rules='', drc_run_dir=None, drc_runset=None,
+                 drc_policy_file=None, drc_policy_profile=None, **kwargs):
 
         max_workers = kwargs.get('max_workers', None)
         cancel_timeout = kwargs.get('cancel_timeout_ms', None)
@@ -122,6 +301,12 @@ class Calibre(VirtuosoChecker):
         self.default_lvs_params = lvs_params
         self.lvs_run_dir = os.path.abspath(rcx_run_dir if (rcx_mode == 'starrc' or rcx_mode == 'qrc') else lvs_run_dir)
         self.lvs_runset = lvs_runset
+        self.drc_run_dir = (
+            os.path.abspath(drc_run_dir) if drc_run_dir else None
+        )
+        self.drc_runset = drc_runset
+        self.drc_policy_file = drc_policy_file
+        self.drc_policy_profile = drc_policy_profile
         self.rcx_run_dir = os.path.abspath(rcx_run_dir)
         self.rcx_runset = rcx_runset
         self.rcx_link_files = rcx_link_files
@@ -152,6 +337,57 @@ class Calibre(VirtuosoChecker):
                     # '%s.pex.netlist.pex' % cell_name,
                     # '%s.pex.netlist.%s.pxi' % (cell_name, cell_name),
                     ]
+
+    def setup_drc_flow(self, lib_name, cell_name):
+        # type: (str, str) -> Sequence[FlowInfo]
+        if not self.drc_run_dir or not self.drc_runset:
+            raise ValueError(
+                'Calibre DRC requires drc_run_dir and drc_runset.'
+            )
+
+        run_dir = os.path.join(self.drc_run_dir, lib_name, cell_name)
+        os.makedirs(run_dir, exist_ok=True)
+        lay_file = os.path.join(run_dir, 'layout.gds')
+
+        cmd, log_file, env, cwd = self.setup_export_layout(
+            lib_name, cell_name, lay_file, 'layout', None
+        )
+        flow_list = [(cmd, log_file, env, cwd, _all_pass)]
+
+        summary_name = '%s.drc.summary' % cell_name
+        summary_file = os.path.join(run_dir, summary_name)
+        with open_temp(prefix='drcLog', dir=run_dir, delete=False) as logf:
+            drc_log_file = logf.name
+
+        runset_content = self.modify_drc_runset(
+            run_dir, lib_name, cell_name, lay_file
+        )
+        with open_temp(
+                prefix='drcRunset', dir=run_dir, delete=False) as runset_file:
+            runset_fname = runset_file.name
+            runset_file.write(runset_content)
+
+        cmd = ['calibre', '-gui', '-drc', '-runset', runset_fname, '-batch']
+        flow_list.append(
+            (
+                cmd,
+                drc_log_file,
+                None,
+                run_dir,
+                lambda rc, lf: drc_passed(
+                    rc,
+                    lf,
+                    summary_file,
+                    policy_file=self.drc_policy_file,
+                    policy_profile=self.drc_policy_profile,
+                    runset_file=self.drc_runset,
+                    lib_name=lib_name,
+                    cell_name=cell_name,
+                    run_dir=run_dir,
+                ),
+            )
+        )
+        return flow_list
 
     def setup_lvs_flow(self, lib_name, cell_name, sch_view='schematic', lay_view='layout',
                        params=None, **kwargs):
@@ -392,6 +628,36 @@ class Calibre(VirtuosoChecker):
         lay_file = os.path.join(run_dir, 'layout.gds')
         sch_file = os.path.join(run_dir, 'schematic.net')
         return lay_file, sch_file
+
+    def modify_drc_runset(self, run_dir, lib_name, cell_name, gds_file):
+        # type: (str, str, str, str) -> str
+        """Return a cell-specific Calibre DRC runset."""
+        drc_options = {}
+        for line in readlines_iter(self.drc_runset):
+            key, val = line.split(':', 1)
+            key = key.strip('*')
+            drc_options[key] = val.strip()
+
+        rules_file = drc_options.get('drcRulesFile')
+        if rules_file and not os.path.isabs(rules_file):
+            drc_options['drcRulesFile'] = os.path.normpath(
+                os.path.join(self.drc_run_dir, rules_file)
+            )
+
+        drc_options['drcRunDir'] = run_dir
+        drc_options['drcLayoutPaths'] = gds_file
+        drc_options['drcLayoutPrimary'] = cell_name
+        drc_options['drcLayoutLibrary'] = lib_name
+        drc_options['drcLayoutView'] = 'layout'
+        drc_options['drcResultsFile'] = '%s.drc.results' % cell_name
+        drc_options['drcSummaryFile'] = '%s.drc.summary' % cell_name
+        drc_options['cmnFDILayoutLibrary'] = lib_name
+        drc_options['cmnFDILayoutView'] = 'layout'
+        drc_options['cmnFDIDEFLayoutPath'] = '%s.def' % cell_name
+
+        return ''.join(
+            ('*%s: %s\n' % (key, val) for key, val in drc_options.items())
+        )
 
     def modify_lvs_runset(self, run_dir, lib_name, cell_name, lay_view, gds_file, netlist,
                           lvs_params, source_lib_name=None,
