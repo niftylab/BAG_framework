@@ -452,25 +452,60 @@ class CdlWriter(object):
                 )
             name = 'X' + name[1:]
 
-        tokens = [name]
-        is_array_instance = len(_expand_bus_name(name)) > 1
+        instance_names = _expand_bus_name(name)
+        is_array_instance = len(instance_names) > 1
+        rendered_connections = []
         for terminal in terminals:
             connection = _validate_identifier(
                 connections[terminal], 'Net name'
             )
+            if is_array_instance and wrapper is None:
+                # Preserve hierarchical Cadence array syntax.  Bus terminals
+                # can span both each child and the parent instance array.
+                rendered_connections.append([connection])
+                continue
+
+            expanded = _expand_net_expression(connection)
             if is_array_instance:
-                # Vectorized Cadence instances use range/replication
-                # expressions collectively across every array element.
-                # Flattening them requires expanding the instance itself.
-                tokens.append(connection)
-            else:
-                tokens.extend(_expand_net_expression(connection))
-        tokens.append(cell_name)
+                if len(expanded) == 1:
+                    expanded *= len(instance_names)
+                if len(expanded) != len(instance_names):
+                    raise ValueError(
+                        'Primitive wrapper array instance {!r} terminal {!r} '
+                        'expands to {} nets for {} instances.'.format(
+                            name,
+                            terminal,
+                            len(expanded),
+                            len(instance_names),
+                        )
+                    )
+            rendered_connections.append(expanded)
+
+        parameter_tokens = []
         for parameter, value in parameters.items():
             _validate_identifier(parameter, 'Parameter name')
-            tokens.append(
+            parameter_tokens.append(
                 '{}={}'.format(parameter, _format_parameter_value(value))
             )
+
+        statement = []
+        if is_array_instance and wrapper is not None:
+            for index, instance_name in enumerate(instance_names):
+                tokens = [instance_name]
+                tokens.extend(
+                    terminal_connections[index]
+                    for terminal_connections in rendered_connections
+                )
+                tokens.append(cell_name)
+                tokens.extend(parameter_tokens)
+                statement.extend(self._wrap_tokens(tokens))
+        else:
+            tokens = [name]
+            for terminal_connections in rendered_connections:
+                tokens.extend(terminal_connections)
+            tokens.append(cell_name)
+            tokens.extend(parameter_tokens)
+            statement.extend(self._wrap_tokens(tokens))
 
         child_cell = None
         dependency = None
@@ -481,7 +516,7 @@ class CdlWriter(object):
             child_cell = cell_name
         if template_instance.element_type == 'X' and wrapper is None:
             dependency = (lib_name, cell_name)
-        return self._wrap_tokens(tokens), child_cell, dependency
+        return statement, child_cell, dependency
 
     def _wrap_tokens(self, tokens):
         lines = []

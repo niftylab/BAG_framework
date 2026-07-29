@@ -325,6 +325,9 @@ def test_cdl_writer_accepts_bag_instance_names_and_schematic_symbols(
         '*.PININFO I:I O:O VDD:B VSS:B\n'
         'MIN0 O I VSS VSS nmos4_fast w=220n l=30n nf=2 '
         '$ @BAG {"lib_name":"BAG_prim"}\n'
+        'MARR<1:0> <*2>O <*2>I <*2>VSS <*2>VSS '
+        'nmos4_fast w=220n l=30n nf=2 '
+        '$ @BAG {"lib_name":"BAG_prim"}\n'
         '.ENDS inv\n',
         encoding='utf-8',
     )
@@ -391,6 +394,9 @@ def test_cdl_writer_accepts_bag_instance_names_and_schematic_symbols(
     assert 'MM0 D G S B nch_ulvt_mac' in output
     assert 'XIN0 VSS O I VSS nmos4_fast' in output
     assert 'nf=4' in output
+    assert 'XARR<1> VSS O I VSS nmos4_fast' in output
+    assert 'XARR<0> VSS O I VSS nmos4_fast' in output
+    assert 'XARR<1:0>' not in output
     assert 'PIN0' not in output
     assert 'I4' not in output
 
