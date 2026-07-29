@@ -54,10 +54,25 @@ def _normalize_subckt_block(lines):
     return '\n'.join(line.strip() for line in lines).lower()
 
 
-def _deduplicate_subckts(ordered_keys, source_texts):
-    """Drop identical duplicate definitions and reject ambiguous collisions."""
+def _deduplicate_subckts(ordered_keys, source_texts,
+                         subckt_overrides=None):
+    """Apply authoritative overrides, then deduplicate subcircuits."""
     seen = {}
     result = {}
+    overrides = {}
+    for name, text in (subckt_overrides or {}).items():
+        lines = text.splitlines()
+        if (
+                not lines
+                or _SUBCKT_RE.match(lines[0]) is None
+                or _SUBCKT_RE.match(lines[0]).group(1).lower()
+                != name.lower()
+                or _ENDS_RE.match(lines[-1]) is None):
+            raise ValueError(
+                'Invalid authoritative .SUBCKT override for {}.'
+                .format(name)
+            )
+        overrides[name.lower()] = lines
 
     for key in ordered_keys:
         lines = source_texts[key].splitlines()
@@ -84,9 +99,11 @@ def _deduplicate_subckts(ordered_keys, source_texts):
                     .format(name, key[0], key[1])
                 )
 
+            canonical_name = name.lower()
+            if canonical_name in overrides:
+                block = overrides[canonical_name]
             normalized = _normalize_subckt_block(block)
             digest = _sha256_text(normalized)
-            canonical_name = name.lower()
             previous = seen.get(canonical_name)
             if previous is None:
                 seen[canonical_name] = (digest, key)
@@ -157,12 +174,13 @@ class CdlBundleBuilder(object):
     """Build one top-cell LVCDL bundle from generated implementation files."""
 
     def __init__(self, source_resolver, extension='.sp',
-                 external_subckts=None):
+                 external_subckts=None, subckt_overrides=None):
         self._source_resolver = source_resolver
         self._extension = extension
         self._external_subckts = set(
             name.lower() for name in (external_subckts or [])
         )
+        self._subckt_overrides = dict(subckt_overrides or {})
 
     def build(self, lib_name, cell_name, bundle_root):
         """Create a dependency-complete bundle and return its ``top.sp``."""
@@ -313,7 +331,11 @@ class CdlBundleBuilder(object):
                     errors='replace') as stream:
                 source_texts[key] = _strip_generated_includes(stream.read())
 
-        source_texts = _deduplicate_subckts(ordered_keys, source_texts)
+        source_texts = _deduplicate_subckts(
+            ordered_keys,
+            source_texts,
+            subckt_overrides=self._subckt_overrides,
+        )
         definitions = set()
         references = set()
         for key in ordered_keys:

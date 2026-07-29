@@ -142,6 +142,32 @@ class CdlWriter(object):
         self.line_length = line_length
         self.primitive_wrappers = dict(primitive_wrappers or {})
 
+    def get_primitive_wrapper_subckts(self):
+        """Return configured primitive wrappers as authoritative subcircuits."""
+        result = OrderedDict()
+        for key, wrapper in self.primitive_wrappers.items():
+            wrapper_cell = key.split('/', 1)[-1]
+            terminals = wrapper.get('terminals', [])
+            wrapper_tokens = ['.SUBCKT', wrapper_cell]
+            wrapper_tokens.extend(terminals)
+            parameters = _ordered_items(
+                wrapper.get('parameters', []),
+                'primitive wrapper parameters',
+            )
+            if parameters:
+                wrapper_tokens.append('PARAMS:')
+                wrapper_tokens.extend(
+                    '{}={}'.format(
+                        name, _format_parameter_value(value)
+                    )
+                    for name, value in parameters.items()
+                )
+            lines = self._wrap_tokens(wrapper_tokens)
+            lines.append(wrapper['body'])
+            lines.append('.ENDS {}'.format(wrapper_cell))
+            result[wrapper_cell] = '\n'.join(lines) + '\n'
+        return result
+
     def write_cell(self, output_dir, impl_lib, template_cell, impl_cell,
                    change):
         """Write one implemented subcircuit and return its absolute path."""
@@ -171,26 +197,9 @@ class CdlWriter(object):
         ]
         if self.primitive_wrappers:
             lines.append('')
-            for key, wrapper in self.primitive_wrappers.items():
-                wrapper_cell = key.split('/', 1)[-1]
-                terminals = wrapper.get('terminals', [])
-                wrapper_tokens = ['.SUBCKT', wrapper_cell]
-                wrapper_tokens.extend(terminals)
-                parameters = _ordered_items(
-                    wrapper.get('parameters', []),
-                    'primitive wrapper parameters',
-                )
-                if parameters:
-                    wrapper_tokens.append('PARAMS:')
-                    wrapper_tokens.extend(
-                        '{}={}'.format(
-                            name, _format_parameter_value(value)
-                        )
-                        for name, value in parameters.items()
-                    )
-                lines.extend(self._wrap_tokens(wrapper_tokens))
-                lines.append(wrapper['body'])
-                lines.append('.ENDS {}'.format(wrapper_cell))
+            for wrapper_text in (
+                    self.get_primitive_wrapper_subckts().values()):
+                lines.extend(wrapper_text.rstrip().splitlines())
                 lines.append('')
         for child_cell in child_cells:
             lines.append(

@@ -278,6 +278,9 @@ class CdlInterface(NetlistInterface):
             ),
             extension=self._writer.extension,
             external_subckts=self._external_subckts,
+            subckt_overrides=(
+                self._writer.get_primitive_wrapper_subckts()
+            ),
         )
         return builder.build(lib_name, cell_name, bundle_root)
 

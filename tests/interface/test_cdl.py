@@ -659,6 +659,89 @@ def test_cdl_interface_builds_library_qualified_lvcdl_bundle(tmp_path):
     assert manifest['preflight']['missing_subckts'] == []
 
 
+def test_cdl_interface_bundle_overwrites_stale_primitive_wrapper(tmp_path):
+    output_root = tmp_path / 'generated_netlists'
+    output_root.mkdir()
+    config = make_config(DATA_DIR / 'buffer2.sp', output_root)
+    config['cdl']['output'] = {
+        'primitive_wrappers': {
+            'BAG_prim/nmos4_fast': {
+                'terminals': ['B', 'D', 'G', 'S'],
+                'parameters': {
+                    'l': '30n',
+                    'w': '220n',
+                    'nf': 1,
+                },
+                'body': (
+                    'MM0 D G S B nch_ulvt_mac '
+                    'l=l w=w m=1*nf nf=1'
+                ),
+            },
+        },
+    }
+    interface = CdlInterface(None, config)
+
+    interface.create_implementation(
+        'logic_generated',
+        [('logic_templates', 'inv', 'inv_2x')],
+        [dict(
+            name='inv_2x',
+            pin_map={},
+            inst_list=[],
+            new_pins=[],
+        )],
+    )
+    interface.create_implementation(
+        'adc_generated',
+        [('logic_templates', 'buffer2', 'adc_top')],
+        [dict(
+            name='adc_top',
+            pin_map={},
+            inst_list={
+                'XINV0': [{
+                    'name': 'XINV0',
+                    'lib_name': 'logic_generated',
+                    'cell_name': 'inv_2x',
+                    'params': {},
+                    'term_mapping': {},
+                }],
+                'XINV1': [],
+            },
+            new_pins=[],
+        )],
+    )
+
+    stale_child = Path(interface.get_implementation_path(
+        'logic_generated', 'inv_2x'
+    ))
+    stale_child.write_text(
+        stale_child.read_text(encoding='utf-8').replace(
+            '.SUBCKT nmos4_fast B D G S '
+            'PARAMS: l=30n w=220n nf=1',
+            '.SUBCKT nmos4_fast B D G S',
+        ),
+        encoding='utf-8',
+    )
+
+    bundle_top = Path(interface.create_lvcdl_bundle(
+        'adc_generated',
+        'adc_top',
+        tmp_path / 'bundles',
+    ))
+    copied_child = (
+        bundle_top.parent
+        / 'libs'
+        / 'logic_generated'
+        / 'inv_2x.sp'
+    )
+    copied_text = copied_child.read_text(encoding='utf-8')
+    assert (
+        '.SUBCKT nmos4_fast B D G S '
+        'PARAMS: l=30n w=220n nf=1'
+    ) in copied_text
+    assert copied_text.count('.SUBCKT nmos4_fast') == 1
+
+
 def test_cdl_interface_bundle_rejects_missing_cross_library_child(tmp_path):
     output_root = tmp_path / 'generated_netlists'
     output_root.mkdir()
