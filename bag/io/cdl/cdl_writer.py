@@ -174,9 +174,21 @@ class CdlWriter(object):
             for key, wrapper in self.primitive_wrappers.items():
                 wrapper_cell = key.split('/', 1)[-1]
                 terminals = wrapper.get('terminals', [])
-                lines.append('.SUBCKT {} {}'.format(
-                    wrapper_cell, ' '.join(terminals)
-                ).rstrip())
+                wrapper_tokens = ['.SUBCKT', wrapper_cell]
+                wrapper_tokens.extend(terminals)
+                parameters = _ordered_items(
+                    wrapper.get('parameters', []),
+                    'primitive wrapper parameters',
+                )
+                if parameters:
+                    wrapper_tokens.append('PARAMS:')
+                    wrapper_tokens.extend(
+                        '{}={}'.format(
+                            name, _format_parameter_value(value)
+                        )
+                        for name, value in parameters.items()
+                    )
+                lines.extend(self._wrap_tokens(wrapper_tokens))
                 lines.append(wrapper['body'])
                 lines.append('.ENDS {}'.format(wrapper_cell))
                 lines.append('')

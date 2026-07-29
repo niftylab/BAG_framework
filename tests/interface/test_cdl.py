@@ -335,6 +335,11 @@ def test_cdl_writer_accepts_bag_instance_names_and_schematic_symbols(
         'primitive_wrappers': {
             'BAG_prim/nmos4_fast': {
                 'terminals': ['B', 'D', 'G', 'S'],
+                'parameters': {
+                    'l': '30n',
+                    'w': '220n',
+                    'nf': 1,
+                },
                 'body': 'MM0 D G S B nch_ulvt_mac l=l w=w m=1*nf nf=1',
             },
         },
@@ -379,7 +384,10 @@ def test_cdl_writer_accepts_bag_instance_names_and_schematic_symbols(
     output = (
         output_root / 'logic_generated' / 'inv_lvs_2x.sp'
     ).read_text(encoding='utf-8')
-    assert '.SUBCKT nmos4_fast B D G S' in output
+    assert (
+        '.SUBCKT nmos4_fast B D G S PARAMS: l=30n w=220n nf=1'
+        in output
+    )
     assert 'MM0 D G S B nch_ulvt_mac' in output
     assert 'XIN0 VSS O I VSS nmos4_fast' in output
     assert 'nf=4' in output
