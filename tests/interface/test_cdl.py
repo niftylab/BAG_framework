@@ -181,6 +181,74 @@ def test_cdl_interface_uses_child_subckt_pin_order(tmp_path):
     assert 'XU0 netA netB netC child_impl' in output
 
 
+def test_cdl_writer_expands_bus_ports_and_scalar_instance_connections(
+        tmp_path):
+    source = tmp_path / 'bus_hierarchy.cdl'
+    source.write_text(
+        '.SUBCKT child D<1:0> Y\n'
+        '* @BAG {"lib_name":"logic_templates"}\n'
+        '*.PININFO D<1:0>:I Y:O\n'
+        '.ENDS child\n'
+        '.SUBCKT parent P<3:0> Q<0:1> Y\n'
+        '* @BAG {"lib_name":"logic_templates"}\n'
+        '*.PININFO P<3:0>:I Q<0:1>:I Y:O\n'
+        'XU0 P<3>,P<1> Y child '
+        '$ @BAG {"lib_name":"logic_templates",'
+        '"terminals":["D<1:0>","Y"]}\n'
+        'XU1 <*2>P<0> Y child '
+        '$ @BAG {"lib_name":"logic_templates",'
+        '"terminals":["D<1:0>","Y"]}\n'
+        'XUA<1:0> P<1:0> Q<0:1> child '
+        '$ @BAG {"lib_name":"logic_templates",'
+        '"terminals":["D<1:0>","Y"]}\n'
+        '.ENDS parent\n',
+        encoding='utf-8',
+    )
+    output_root = tmp_path / 'generated'
+    output_root.mkdir()
+    interface = CdlInterface(None, make_config(source, output_root))
+
+    interface.instantiate_schematic(
+        'logic_generated',
+        [(
+            'logic_templates',
+            'parent',
+            'parent_impl',
+            {
+                'P<3:0>': 'DATA<3:0>',
+                'Q<0:1>': 'CTRL<0:1>',
+                'Y': 'Y',
+            },
+            {
+                'XU0': [{
+                    'name': 'XU0',
+                    'lib_name': 'logic_generated',
+                    'cell_name': 'child_impl',
+                    'params': {},
+                    'term_mapping': {},
+                }],
+            },
+            [],
+        )],
+        lib_path=str(output_root),
+    )
+
+    output = (
+        output_root / 'logic_generated' / 'parent_impl.sp'
+    ).read_text(encoding='utf-8')
+    assert (
+        '.SUBCKT parent_impl DATA<3> DATA<2> DATA<1> DATA<0> '
+        'CTRL<0> CTRL<1> Y'
+    ) in output
+    assert (
+        '*.PININFO DATA<3>:I DATA<2>:I DATA<1>:I DATA<0>:I '
+        'CTRL<0>:I CTRL<1>:I Y:O'
+    ) in output
+    assert 'XU0 P<3> P<1> Y child_impl' in output
+    assert 'XU1 P<0> P<0> Y child' in output
+    assert 'XUA<1:0> P<1:0> Q<0:1> child' in output
+
+
 def test_cdl_writer_output_options_and_validation(tmp_path):
     output_root = tmp_path / 'generated_netlists'
     output_root.mkdir()
@@ -248,7 +316,8 @@ def test_cdl_writer_output_options_and_validation(tmp_path):
         )
 
 
-def test_cdl_writer_accepts_bag_instance_names_and_pin_symbols(tmp_path):
+def test_cdl_writer_accepts_bag_instance_names_and_schematic_symbols(
+        tmp_path):
     source = tmp_path / 'inv.cdl'
     source.write_text(
         '.SUBCKT inv I O VDD VSS\n'
@@ -294,6 +363,13 @@ def test_cdl_writer_accepts_bag_instance_names_and_pin_symbols(tmp_path):
                     'params': {},
                     'term_mapping': {},
                 }],
+                'I4': [{
+                    'name': 'I4',
+                    'lib_name': 'basic',
+                    'cell_name': 'noConn',
+                    'params': {},
+                    'term_mapping': {},
+                }],
             },
             [],
         )],
@@ -308,6 +384,7 @@ def test_cdl_writer_accepts_bag_instance_names_and_pin_symbols(tmp_path):
     assert 'XIN0 VSS O I VSS nmos4_fast' in output
     assert 'nf=4' in output
     assert 'PIN0' not in output
+    assert 'I4' not in output
 
 
 def test_import_design_library_creates_bag_templates(tmp_path):

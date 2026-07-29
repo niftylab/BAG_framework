@@ -15,6 +15,12 @@ _NUMBER_RE = re.compile(
     r'(?:e[+-]?\d+|[a-z][a-z0-9]*)?$',
     re.IGNORECASE,
 )
+_BUS_RANGE_RE = re.compile(
+    r'^(?P<base>.+)<(?P<first>-?\d+):(?P<last>-?\d+)>$'
+)
+_REPLICATION_RE = re.compile(
+    r'^<\*(?P<count>\d+)>(?P<value>.+)$'
+)
 _PININFO_CODES = {
     'input': 'I',
     'output': 'O',
@@ -78,6 +84,44 @@ def _format_parameter_value(value):
             '{!r}.'.format(value)
         )
     return "'{}'".format(value)
+
+
+def _expand_bus_name(value):
+    """Expand one trailing CDBA bus range while preserving its direction."""
+    value = _validate_identifier(value, 'CDL name')
+    match = _BUS_RANGE_RE.match(value)
+    if match is None:
+        return [value]
+
+    first = int(match.group('first'))
+    last = int(match.group('last'))
+    step = 1 if last >= first else -1
+    base = match.group('base')
+    return [
+        '{}<{}>'.format(base, index)
+        for index in range(first, last + step, step)
+    ]
+
+
+def _expand_net_expression(value):
+    """Expand CDBA concatenation, replication, and simple bus ranges."""
+    value = _validate_identifier(value, 'Net name')
+    answer = []
+    for part in value.split(','):
+        if not part:
+            raise ValueError(
+                'Net expression {!r} contains an empty concatenation item.'
+                .format(value)
+            )
+        replication = _REPLICATION_RE.match(part)
+        if replication is not None:
+            count = int(replication.group('count'))
+            expanded = _expand_net_expression(replication.group('value'))
+            for _ in range(count):
+                answer.extend(expanded)
+        else:
+            answer.extend(_expand_bus_name(part))
+    return answer
 
 
 class CdlWriter(object):
@@ -204,20 +248,23 @@ class CdlWriter(object):
             if len(new_pin) != 2:
                 raise ValueError('New pin entry cannot be empty.')
             pin_name = _validate_identifier(new_pin[0], 'New pin name')
-            pin_entries.append(
-                (pin_name, self._get_pin_info_code(new_pin[1], pin_name))
+            direction_code = self._get_pin_info_code(
+                new_pin[1], pin_name
+            )
+            pin_entries.extend(
+                (expanded_pin, direction_code)
+                for expanded_pin in _expand_bus_name(pin_name)
             )
         for old_pin in template_cell.pins:
             mapped_pin = pin_map.get(old_pin, old_pin)
             if mapped_pin:
                 pin_name = _validate_identifier(mapped_pin, 'Mapped pin name')
-                pin_entries.append(
-                    (
-                        pin_name,
-                        self._get_pin_info_code(
-                            template_cell.pin_directions[old_pin], pin_name
-                        ),
-                    )
+                direction_code = self._get_pin_info_code(
+                    template_cell.pin_directions[old_pin], pin_name
+                )
+                pin_entries.extend(
+                    (expanded_pin, direction_code)
+                    for expanded_pin in _expand_bus_name(pin_name)
                 )
 
         pins = [pin_name for pin_name, _ in pin_entries]
@@ -260,7 +307,7 @@ class CdlWriter(object):
                 ]
                 if len(aliases) == 1:
                     template_name = aliases[0]
-                elif self._is_bag_pin_symbol(change_name, replacements):
+                elif self._is_bag_schematic_symbol(change_name, replacements):
                     continue
                 else:
                     unknown_instances.append(change_name)
@@ -316,14 +363,14 @@ class CdlWriter(object):
         )
 
     @staticmethod
-    def _is_bag_pin_symbol(change_name, replacements):
-        """Return True for schematic-only ipin/opin/iopin instances."""
+    def _is_bag_schematic_symbol(change_name, replacements):
+        """Return True for schematic-only pin and no-connect instances."""
         if not replacements:
             return change_name.upper().startswith('PIN')
-        pin_cells = {'ipin', 'opin', 'iopin', 'sympin'}
+        schematic_cells = {'ipin', 'opin', 'iopin', 'sympin', 'noConn'}
         return all(
             replacement.get('lib_name') == 'basic'
-            and replacement.get('cell_name') in pin_cells
+            and replacement.get('cell_name') in schematic_cells
             for replacement in replacements
         )
 
@@ -394,10 +441,18 @@ class CdlWriter(object):
             name = 'X' + name[1:]
 
         tokens = [name]
-        tokens.extend(
-            _validate_identifier(connections[terminal], 'Net name')
-            for terminal in terminals
-        )
+        is_array_instance = len(_expand_bus_name(name)) > 1
+        for terminal in terminals:
+            connection = _validate_identifier(
+                connections[terminal], 'Net name'
+            )
+            if is_array_instance:
+                # Vectorized Cadence instances use range/replication
+                # expressions collectively across every array element.
+                # Flattening them requires expanding the instance itself.
+                tokens.append(connection)
+            else:
+                tokens.extend(_expand_net_expression(connection))
         tokens.append(cell_name)
         for parameter, value in parameters.items():
             _validate_identifier(parameter, 'Parameter name')
