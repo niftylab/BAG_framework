@@ -8,6 +8,7 @@ import yaml
 
 from bag.interface.cdl import CdlInterface
 from bag.io.cdl import CdlParser
+from bag.io.cdl.cdl_writer import _expand_net_expression
 from bag.util.cache import ClassImporter
 
 
@@ -26,6 +27,38 @@ def make_config(source_file, output_root):
             strict=True,
         ),
     )
+
+
+def test_cdl_writer_expands_strided_bus_ranges():
+    assert _expand_net_expression(
+        'DOUT<0:24:8>,DOUT<1:25:8>'
+    ) == [
+        'DOUT<0>',
+        'DOUT<8>',
+        'DOUT<16>',
+        'DOUT<24>',
+        'DOUT<1>',
+        'DOUT<9>',
+        'DOUT<17>',
+        'DOUT<25>',
+    ]
+    assert _expand_net_expression('DI<32:0:8>') == [
+        'DI<32>',
+        'DI<24>',
+        'DI<16>',
+        'DI<8>',
+        'DI<0>',
+    ]
+    assert _expand_net_expression('DI<28:0:4>') == [
+        'DI<28>',
+        'DI<24>',
+        'DI<20>',
+        'DI<16>',
+        'DI<12>',
+        'DI<8>',
+        'DI<4>',
+        'DI<0>',
+    ]
 
 
 def test_cdl_interface_indexes_and_serializes(tmp_path):
@@ -97,7 +130,13 @@ def test_cdl_interface_writes_structural_implementation(tmp_path):
                     'lib_name': 'logic_generated',
                     'cell_name': 'inv_array',
                     'params': {},
-                    'term_mapping': {},
+                    'term_mapping': {
+                        'BIAS': 'BIAS_TOP',
+                        'IN': 'IN',
+                        'Z': 'MID',
+                        'VDD': 'VDD',
+                        'VSS': 'VSS',
+                    },
                 },
             ],
             'XINV1': [],
@@ -129,7 +168,7 @@ def test_cdl_interface_writes_structural_implementation(tmp_path):
 
     assert '.include "inv_array.sp"' in top_text
     assert '*.PININFO IN:I OUT:O VDD:B VSS:B' in top_text
-    assert 'XINV0 IN MID VDD VSS inv_array' in top_text
+    assert 'XINV0 BIAS_TOP IN MID VDD VSS inv_array' in top_text
     assert 'XINV1' not in top_text
     assert '.ENDS buffer_generated' in top_text
 
@@ -246,7 +285,9 @@ def test_cdl_writer_expands_bus_ports_and_scalar_instance_connections(
     ) in output
     assert 'XU0 P<3> P<1> Y child_impl' in output
     assert 'XU1 P<0> P<0> Y child' in output
-    assert 'XUA<1:0> P<1:0> Q<0:1> child' in output
+    assert 'XUA<1> P<1> P<0> Q<0> child' in output
+    assert 'XUA<0> P<1> P<0> Q<1> child' in output
+    assert 'XUA<1:0>' not in output
 
 
 def test_cdl_writer_output_options_and_validation(tmp_path):
@@ -824,7 +865,7 @@ def test_cdl_interface_bundle_rejects_cross_library_subckt_collision(
                     'lib_name': 'second_generated',
                     'cell_name': 'shared',
                     'params': {},
-                    'term_mapping': {},
+                    'term_mapping': {'Z': 'OUT'},
                 }],
             },
             new_pins=[],

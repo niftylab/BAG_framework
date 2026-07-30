@@ -16,7 +16,8 @@ _NUMBER_RE = re.compile(
     re.IGNORECASE,
 )
 _BUS_RANGE_RE = re.compile(
-    r'^(?P<base>.+)<(?P<first>-?\d+):(?P<last>-?\d+)>$'
+    r'^(?P<base>.+)<(?P<first>-?\d+):(?P<last>-?\d+)'
+    r'(?::(?P<stride>-?\d+))?>$'
 )
 _REPLICATION_RE = re.compile(
     r'^<\*(?P<count>\d+)>(?P<value>.+)$'
@@ -95,11 +96,29 @@ def _expand_bus_name(value):
 
     first = int(match.group('first'))
     last = int(match.group('last'))
-    step = 1 if last >= first else -1
+    stride = match.group('stride')
+    if stride is None:
+        step = 1 if last >= first else -1
+    else:
+        stride_value = abs(int(stride))
+        if stride_value == 0:
+            raise ValueError(
+                'CDL bus range {!r} has a zero stride.'.format(value)
+            )
+        if abs(last - first) % stride_value:
+            raise ValueError(
+                'CDL bus range {!r} does not end on its stride.'
+                .format(value)
+            )
+        step = stride_value if last >= first else -stride_value
     base = match.group('base')
     return [
         '{}<{}>'.format(base, index)
-        for index in range(first, last + step, step)
+        for index in range(
+            first,
+            last + (1 if step > 0 else -1),
+            step,
+        )
     ]
 
 
@@ -141,6 +160,7 @@ class CdlWriter(object):
         self.extension = extension
         self.line_length = line_length
         self.primitive_wrappers = dict(primitive_wrappers or {})
+        self._implementation_terminals = {}
 
     def get_primitive_wrapper_subckts(self):
         """Return configured primitive wrappers as authoritative subcircuits."""
@@ -183,7 +203,7 @@ class CdlWriter(object):
                 '{!r}.'.format(impl_cell, change.get('name'))
             )
 
-        pins, pin_info = self._get_pins(template_cell, change)
+        pins, pin_info, terminals = self._get_pins(template_cell, change)
         instance_lines, child_cells, dependencies = self._get_instances(
             impl_lib, impl_cell, template_cell, change
         )
@@ -248,6 +268,7 @@ class CdlWriter(object):
             ) + '\n',
             mkdir=False,
         )
+        self._implementation_terminals[(impl_lib, impl_cell)] = terminals
         return output_file
 
     @staticmethod
@@ -265,6 +286,7 @@ class CdlWriter(object):
             )
 
         pin_entries = []
+        terminals = []
         for new_pin in change.get('new_pins', []):
             if len(new_pin) != 2:
                 raise ValueError('New pin entry cannot be empty.')
@@ -272,6 +294,7 @@ class CdlWriter(object):
             direction_code = self._get_pin_info_code(
                 new_pin[1], pin_name
             )
+            terminals.append(pin_name)
             pin_entries.extend(
                 (expanded_pin, direction_code)
                 for expanded_pin in _expand_bus_name(pin_name)
@@ -283,6 +306,7 @@ class CdlWriter(object):
                 direction_code = self._get_pin_info_code(
                     template_cell.pin_directions[old_pin], pin_name
                 )
+                terminals.append(pin_name)
                 pin_entries.extend(
                     (expanded_pin, direction_code)
                     for expanded_pin in _expand_bus_name(pin_name)
@@ -298,10 +322,14 @@ class CdlWriter(object):
                 'Implemented subcircuit has duplicate pins: {}.'
                 .format(', '.join(duplicates))
             )
-        return pins, [
-            '{}:{}'.format(pin_name, direction_code)
-            for pin_name, direction_code in pin_entries
-        ]
+        return (
+            pins,
+            [
+                '{}:{}'.format(pin_name, direction_code)
+                for pin_name, direction_code in pin_entries
+            ],
+            terminals,
+        )
 
     @staticmethod
     def _get_pin_info_code(direction, pin_name):
@@ -416,8 +444,14 @@ class CdlWriter(object):
         term_mapping = _ordered_items(
             replacement.get('term_mapping', []), 'terminal mapping'
         )
+        implementation_terminals = self._implementation_terminals.get(
+            (lib_name, cell_name)
+        )
+        known_terminals = set(connections.keys())
+        if implementation_terminals is not None:
+            known_terminals.update(implementation_terminals)
         unknown_terminals = sorted(
-            set(term_mapping.keys()) - set(connections.keys())
+            set(term_mapping.keys()) - known_terminals
         )
         if unknown_terminals:
             raise ValueError(
@@ -444,7 +478,11 @@ class CdlWriter(object):
             '{}/{}'.format(lib_name, cell_name)
         )
         if wrapper is None:
-            terminals = template_instance.terminals
+            terminals = (
+                implementation_terminals
+                if implementation_terminals is not None
+                else template_instance.terminals
+            )
         else:
             terminals = wrapper.get('terminals', [])
             unknown_wrapper_terminals = sorted(
@@ -460,6 +498,14 @@ class CdlWriter(object):
                     )
                 )
             name = 'X' + name[1:]
+        missing_terminals = sorted(
+            set(terminals) - set(connections.keys())
+        )
+        if missing_terminals:
+            raise ValueError(
+                'Instance {!r} does not map implemented terminals: {}.'
+                .format(name, ', '.join(missing_terminals))
+            )
 
         instance_names = _expand_bus_name(name)
         is_array_instance = len(instance_names) > 1
@@ -468,27 +514,38 @@ class CdlWriter(object):
             connection = _validate_identifier(
                 connections[terminal], 'Net name'
             )
-            if is_array_instance and wrapper is None:
-                # Preserve hierarchical Cadence array syntax.  Bus terminals
-                # can span both each child and the parent instance array.
-                rendered_connections.append([connection])
-                continue
-
             expanded = _expand_net_expression(connection)
             if is_array_instance:
-                if len(expanded) == 1:
-                    expanded *= len(instance_names)
-                if len(expanded) != len(instance_names):
+                terminal_width = len(_expand_bus_name(terminal))
+                total_width = terminal_width * len(instance_names)
+                if len(expanded) == terminal_width:
+                    groups = [
+                        list(expanded) for _ in instance_names
+                    ]
+                elif len(expanded) == total_width:
+                    groups = [
+                        expanded[
+                            index * terminal_width:
+                            (index + 1) * terminal_width
+                        ]
+                        for index in range(len(instance_names))
+                    ]
+                else:
                     raise ValueError(
-                        'Primitive wrapper array instance {!r} terminal {!r} '
-                        'expands to {} nets for {} instances.'.format(
+                        'Array instance {!r} terminal {!r} expands to {} '
+                        'nets; expected {} shared nets or {} nets for {} '
+                        'instances.'.format(
                             name,
                             terminal,
                             len(expanded),
+                            terminal_width,
+                            total_width,
                             len(instance_names),
                         )
                     )
-            rendered_connections.append(expanded)
+                rendered_connections.append(groups)
+            else:
+                rendered_connections.append([expanded])
 
         parameter_tokens = []
         for parameter, value in parameters.items():
@@ -498,20 +555,18 @@ class CdlWriter(object):
             )
 
         statement = []
-        if is_array_instance and wrapper is not None:
+        if is_array_instance:
             for index, instance_name in enumerate(instance_names):
                 tokens = [instance_name]
-                tokens.extend(
-                    terminal_connections[index]
-                    for terminal_connections in rendered_connections
-                )
+                for terminal_connections in rendered_connections:
+                    tokens.extend(terminal_connections[index])
                 tokens.append(cell_name)
                 tokens.extend(parameter_tokens)
                 statement.extend(self._wrap_tokens(tokens))
         else:
             tokens = [name]
             for terminal_connections in rendered_connections:
-                tokens.extend(terminal_connections)
+                tokens.extend(terminal_connections[0])
             tokens.append(cell_name)
             tokens.extend(parameter_tokens)
             statement.extend(self._wrap_tokens(tokens))
