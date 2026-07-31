@@ -2,7 +2,9 @@ from pathlib import Path
 
 import pytest
 
+import bag.io.cdl.bundle as bundle_module
 from bag.io.cdl import (
+    CdlBundleBuilder,
     CdlParseError,
     CdlParser,
     CdlTemplateWriter,
@@ -11,6 +13,38 @@ from bag.io.cdl import (
 
 
 DATA_DIR = Path(__file__).parent / 'data'
+
+
+def test_bundle_publish_retries_transient_permission_error(
+        tmp_path, monkeypatch):
+    implementation = tmp_path / 'implementations' / 'top.sp'
+    implementation.parent.mkdir()
+    implementation.write_text(
+        '.SUBCKT top A B\n.ENDS top\n',
+        encoding='utf-8',
+    )
+    builder = CdlBundleBuilder(
+        lambda lib_name, cell_name: str(implementation)
+    )
+    real_replace = bundle_module.os.replace
+    replace_calls = []
+
+    def flaky_replace(source, destination):
+        replace_calls.append((source, destination))
+        if len(replace_calls) == 1:
+            raise PermissionError(13, 'transient Windows directory lock')
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(bundle_module.os, 'replace', flaky_replace)
+
+    top_path = builder.build(
+        'test_generated',
+        'top',
+        str(tmp_path / 'bundles'),
+    )
+
+    assert Path(top_path).is_file()
+    assert len(replace_calls) == 2
 
 
 def test_parse_inverter():

@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 
 from .cdl_writer import CdlWriter
 
@@ -19,6 +20,8 @@ _INCLUDE_RE = re.compile(
 )
 _SUBCKT_RE = re.compile(r'^\s*\.subckt\s+(\S+)', re.IGNORECASE)
 _ENDS_RE = re.compile(r'^\s*\.ends(?:\s+\S+)?\s*$', re.IGNORECASE)
+_PUBLISH_RETRY_COUNT = 8
+_PUBLISH_RETRY_DELAY = 0.05
 
 
 def _validate_component(value, description):
@@ -40,6 +43,24 @@ def _posix_path(path):
 
 def _sha256_text(text):
     return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+
+def _publish_directory(staging_dir, target_dir):
+    """Publish a bundle despite transient Windows directory locks."""
+    for attempt in range(_PUBLISH_RETRY_COUNT):
+        try:
+            if os.path.isdir(target_dir):
+                shutil.rmtree(target_dir)
+            os.makedirs(os.path.dirname(target_dir), exist_ok=True)
+            os.replace(staging_dir, target_dir)
+            return
+        except PermissionError:
+            if attempt + 1 == _PUBLISH_RETRY_COUNT:
+                raise
+            time.sleep(min(
+                _PUBLISH_RETRY_DELAY * (2 ** attempt),
+                0.5,
+            ))
 
 
 def _strip_generated_includes(text):
@@ -238,10 +259,7 @@ class CdlBundleBuilder(object):
                 source_paths,
                 dependencies,
             )
-            if os.path.isdir(target_dir):
-                shutil.rmtree(target_dir)
-            os.makedirs(os.path.dirname(target_dir), exist_ok=True)
-            os.replace(staging_dir, target_dir)
+            _publish_directory(staging_dir, target_dir)
             staging_dir = None
             return os.path.join(target_dir, os.path.basename(final_top))
         finally:
