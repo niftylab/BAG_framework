@@ -290,23 +290,61 @@ class SkillInterface(DbAccess):
 
     # default ADE session flavor for this interface class; the
     # ``testbench.flavor`` entry of the database configuration overrides it.
+    # The special value 'auto' picks the flavor per testbench from its
+    # cellviews (see :func:`bag.interface.ade.detect_flavor`).
     ade_flavor_default = 'adexl'
 
-    _ade_session = None
+    _ade_sessions = None
+    _ade_flavor_by_cell = None
+
+    def _configured_ade_flavor(self):
+        return self.db_config.get('testbench', {}).get(
+            'flavor', self.ade_flavor_default)
+
+    def _ade_session_of(self, flavor):
+        from .ade import create_ade_session
+        if self._ade_sessions is None:
+            self._ade_sessions = {}
+        if flavor not in self._ade_sessions:
+            self._ade_sessions[flavor] = create_ade_session(flavor, self)
+        return self._ade_sessions[flavor]
 
     @property
     def ade_session(self):
         """The AdeSession flavor driving this interface's testbench operations.
 
         See :mod:`bag.interface.ade` for the available flavors (ADE-XL,
-        ADE-L, Maestro).
+        ADE-L, Maestro).  With ``testbench.flavor: auto`` the session is
+        chosen per testbench cell, so there is no single session; use the
+        testbench methods directly in that case.
         """
-        if self._ade_session is None:
-            from .ade import create_ade_session
-            flavor = self.db_config.get('testbench', {}).get(
-                'flavor', self.ade_flavor_default)
-            self._ade_session = create_ade_session(flavor, self)
-        return self._ade_session
+        flavor = self._configured_ade_flavor()
+        if flavor == 'auto':
+            raise ValueError(
+                "testbench.flavor is 'auto'; the ADE session is chosen per "
+                "testbench cell, so there is no single ade_session.")
+        return self._ade_session_of(flavor)
+
+    def _ade_session_for(self, tb_lib, tb_cell):
+        """The AdeSession to use for the given testbench cell."""
+        flavor = self._configured_ade_flavor()
+        if flavor == 'auto':
+            from .ade import detect_flavor, AUTO_DETECT_VIEWS
+            if self._ade_flavor_by_cell is None:
+                self._ade_flavor_by_cell = {}
+            key = (tb_lib, tb_cell)
+            if key not in self._ade_flavor_by_cell:
+                detected = detect_flavor(self, tb_lib, tb_cell)
+                if detected is None:
+                    raise ValueError(
+                        'Cannot auto-detect the ADE flavor of %s__%s: none '
+                        'of the flavor cellviews (%s) exist. Is the library '
+                        'registered in cds.lib?'
+                        % (tb_lib, tb_cell,
+                           ', '.join(v for v, _ in AUTO_DETECT_VIEWS)))
+                self._ade_flavor_by_cell[key] = detected
+            flavor = self._ade_flavor_by_cell[key]
+        return self._ade_session_of(flavor)
 
     def configure_testbench(self, tb_lib, tb_cell):
         """Update testbench state for the given testbench.
@@ -329,7 +367,7 @@ class SkillInterface(DbAccess):
         parameters : dict[str, str]
             a list of testbench parameter values, represented as string.
         """
-        return self.ade_session.configure_testbench(tb_lib, tb_cell)
+        return self._ade_session_for(tb_lib, tb_cell).configure_testbench(tb_lib, tb_cell)
 
     def get_testbench_info(self, tb_lib, tb_cell):
         """Returns information about an existing testbench.
@@ -352,7 +390,7 @@ class SkillInterface(DbAccess):
         outputs : dict[str, str]
             a list of testbench output expressions.
         """
-        return self.ade_session.get_testbench_info(tb_lib, tb_cell)
+        return self._ade_session_for(tb_lib, tb_cell).get_testbench_info(tb_lib, tb_cell)
 
     def update_testbench(self,
                          lib,  # type: str
@@ -380,8 +418,8 @@ class SkillInterface(DbAccess):
         env_parameters : List[List[Tuple[str, str]]]
             list of param/value list for each simulation environment.
         """
-        self.ade_session.update_testbench(lib, cell, parameters, sim_envs,
-                                          config_rules, env_parameters)
+        self._ade_session_for(lib, cell).update_testbench(
+            lib, cell, parameters, sim_envs, config_rules, env_parameters)
 
     def run_simulation(self, lib, cell, res_file_name=None):
         """Run a simulation through the ADE session.
@@ -391,8 +429,8 @@ class SkillInterface(DbAccess):
         ``NotImplementedError`` because their simulations go through the
         simulation interface instead.
         """
-        return self.ade_session.run_simulation(lib, cell,
-                                               res_file_name=res_file_name)
+        return self._ade_session_for(lib, cell).run_simulation(
+            lib, cell, res_file_name=res_file_name)
 
     def instantiate_layout_pcell(self, lib_name, cell_name, view_name,
                                  inst_lib, inst_cell, params, pin_mapping):

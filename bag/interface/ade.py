@@ -404,6 +404,42 @@ class MaestroSession(AdexlSession):
 SESSION_CLASSES = {cls.flavor: cls
                    for cls in (AdexlSession, AdelSession, MaestroSession)}
 
+#: Detection order for ``testbench.flavor: auto``: the first cellview in
+#: this list that exists on the testbench cell picks the flavor.
+AUTO_DETECT_VIEWS = (
+    ('spectre_state1', 'adel'),
+    ('maestro', 'maestro'),
+    ('adexl', 'adexl'),
+)
+
+
+def detect_flavor(db, tb_lib, tb_cell):
+    """Detect the ADE flavor of a testbench from its cellviews.
+
+    Parameters
+    ----------
+    db : :class:`bag.interface.skill.SkillInterface`
+        the database interface used to evaluate skill expressions.
+    tb_lib : str
+        testbench library name.
+    tb_cell : str
+        testbench cell name.
+
+    Returns
+    -------
+    flavor : str or None
+        the detected flavor name, or None if none of the flavor cellviews
+        exist (e.g. the library is not registered in cds.lib).
+    """
+    checks = ' '.join('(ddGetObj("%s" "%s" "%s") && t)' % (tb_lib, tb_cell, view)
+                      for view, _flavor in AUTO_DETECT_VIEWS)
+    reply = db._eval_skill('list(%s)' % checks)
+    tokens = reply.strip().lstrip('(').rstrip(')').split()
+    for (_view, flavor), token in zip(AUTO_DETECT_VIEWS, tokens):
+        if token == 't':
+            return flavor
+    return None
+
 
 def create_ade_session(flavor, db):
     """Create the session object for the given ADE flavor name.
