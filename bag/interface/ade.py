@@ -298,35 +298,107 @@ class AdelSession(AdexlSession):
         return results
 
 
-class MaestroSession(AdeSession):
-    """Maestro (ADE Assembler) session flavor -- not implemented yet.
+class MaestroSession(AdexlSession):
+    """Maestro (ADE Assembler) session flavor (``bag_maestro_session.il``).
 
-    tbadc-style testbenches store their setup in ``maestro`` views; they
-    will be driven here once the ``bag_maestro_session.il`` SKILL family is
-    implemented.  Until then convert the testbench to an ADE-L
-    ``spectre_state1`` state, or use an adexl/adel testbench.
+    ADE Assembler is the successor to ADE-XL and drives the same ``axl*``
+    SKILL API, so this reuses :class:`AdexlSession` with the ``maestro``
+    cellview.  The maestro view (``maestro.sdb`` + ``active.state``) is
+    authored in Virtuoso and opened in place, so there is no separate
+    instantiate step: ``configure_testbench`` reads the existing setup the
+    same way ``get_testbench_info`` does.  As with ADE-XL, the simulation
+    itself runs through the Ocean simulation interface, not the skill
+    server, so ``run_simulation`` is inherited (and raises).
     """
 
     flavor = 'maestro'
 
-    def _not_implemented(self):
-        raise NotImplementedError(
-            'Maestro ADE sessions are not implemented yet; convert the '
-            'testbench to an ADE-L spectre_state1 state or use the adexl/'
-            'adel flavor.')
-
     def configure_testbench(self, tb_lib, tb_cell):
-        self._not_implemented()
+        """Read the pre-built maestro setup for the given testbench.
+
+        Parameters
+        ----------
+        tb_lib : str
+            testbench library name.
+        tb_cell : str
+            testbench cell name.
+
+        Returns
+        -------
+        cur_env : str
+            the current simulation environment (from the config default).
+        envs : list[str]
+            a list of available simulation environments.
+        parameters : dict[str, str]
+            testbench parameter values, as strings.
+        outputs : dict[str, str]
+            testbench output expressions.
+        """
+        _enabled, corners, params, outputs = self.get_testbench_info(tb_lib, tb_cell)
+        default_env = self.db_config['testbench']['default_env']
+        return default_env, corners, params, outputs
 
     def get_testbench_info(self, tb_lib, tb_cell):
-        self._not_implemented()
+        """Returns corner/parameter/output information of a maestro testbench.
 
-    def update_testbench(self, lib, cell, parameters, sim_envs, config_rules,
-                         env_parameters):
-        self._not_implemented()
+        Parameters
+        ----------
+        tb_lib : str
+            testbench library.
+        tb_cell : str
+            testbench cell.
 
-    def run_simulation(self, lib, cell, res_file_name=None):
-        self._not_implemented()
+        Returns
+        -------
+        cur_envs : list[str]
+            the currently enabled simulation environments.
+        envs : list[str]
+            a list of available simulation environments.
+        parameters : dict[str, str]
+            testbench parameter values, as strings.
+        outputs : dict[str, str]
+            testbench output expressions.
+        """
+        cmd = 'maestro_get_testbench_info("{tb_lib}" "{tb_cell}" {result_file})'
+        cmd = cmd.format(tb_lib=tb_lib, tb_cell=tb_cell, result_file='{result_file}')
+        output = yaml.load(self._eval_skill(cmd, out_file='result_file'), Loader=yaml.FullLoader)
+        return output['enabled_corners'], output['corners'], output['parameters'], output['outputs']
+
+    def update_testbench(self,
+                         lib,  # type: str
+                         cell,  # type: str
+                         parameters,  # type: Dict[str, str]
+                         sim_envs,  # type: List[str]
+                         config_rules,  # type: List[List[str]]
+                         env_parameters  # type: List[List[Tuple[str, str]]]
+                         ):
+        # type: (...) -> None
+        """Update corners, parameters, and run options of a maestro testbench.
+
+        Parameters
+        ----------
+        lib : str
+            testbench library.
+        cell : str
+            testbench cell.
+        parameters : Dict[str, str]
+            testbench parameters.
+        sim_envs : List[str]
+            list of enabled simulation environments.
+        config_rules : List[List[str]]
+            config view mapping rules, list of (lib, cell, view) rules.
+        env_parameters : List[List[Tuple[str, str]]]
+            list of param/value list for each simulation environment.
+        """
+        cmd = ('maestro_modify_testbench("%s" "%s" {conf_rules} {run_opts} '
+               '{sim_envs} {params} {env_params})' % (lib, cell))
+        in_files = {'conf_rules': config_rules,
+                    'run_opts': [],
+                    'sim_envs': sim_envs,
+                    'params': list(parameters.items()),
+                    'env_params': list(zip(sim_envs, env_parameters)),
+                    }
+        self._eval_skill(cmd, input_files=in_files)
 
 
 SESSION_CLASSES = {cls.flavor: cls

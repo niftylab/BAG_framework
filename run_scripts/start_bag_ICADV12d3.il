@@ -1683,6 +1683,7 @@ let( (bag_run_dir)
     )
     load(strcat(bag_run_dir "/bag_adexl_session.il"))
     load(strcat(bag_run_dir "/bag_adel_session.il"))
+    load(strcat(bag_run_dir "/bag_maestro_session.il"))
 )
 
 ; Create a new config view for a testbench.

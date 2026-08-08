@@ -188,11 +188,13 @@ procedure( instantiate_testbench(tb_cell targ_lib
 )
 
 ; Returns parameter and corner information of a testbench.
-procedure( get_testbench_info(tb_lib tb_cell result_file "ttt")
+; tb_view selects the assembler cellview: "adexl" (default) or "maestro"
+; (ADE Assembler shares the axl* API, cf. bag_maestro_session.il).
+procedure( get_testbench_info(tb_lib tb_cell result_file @optional (tb_view "adexl"))
     let( (session_name session_sdb session sdb test_names test_name ade_symbol asi_sess
         output_list corner_list en_list success)
         session_name = "read_adexl"
-        session_sdb = open_adexl_session(tb_lib tb_cell "adexl" session_name "r")
+        session_sdb = open_adexl_session(tb_lib tb_cell tb_view session_name "r")
         session = car(session_sdb)
         sdb = cadr(session_sdb)
 
@@ -257,7 +259,8 @@ procedure( set_run_options(session sdb run_params "ggl")
 ; opt_file contains the association list of run mode options.
 ; corner_file contains a list of corners to simulate.
 ; param_file contains the association list of parameter values.
-procedure( modify_testbench(tb_lib tb_cell conf_file opt_file corner_file param_file env_params_file "ttttttt")
+; tb_view selects the assembler cellview: "adexl" (default) or "maestro".
+procedure( modify_testbench(tb_lib tb_cell conf_file opt_file corner_file param_file env_params_file @optional (tb_view "adexl"))
     let( (tmp_list session sdb conf_list run_params corner_list param_values env_param_values session_name)
         sprintf(session_name "bag_sim_adexl_%s" getCurrentTime())
 
@@ -273,7 +276,7 @@ procedure( modify_testbench(tb_lib tb_cell conf_file opt_file corner_file param_
             edit_config_view(tb_lib tb_cell "config" conf_list)
         )
 
-        tmp_list = open_adexl_session(tb_lib tb_cell "adexl" session_name "a")
+        tmp_list = open_adexl_session(tb_lib tb_cell tb_view session_name "a")
         session = car(tmp_list)
         sdb = cadr(tmp_list)
 
