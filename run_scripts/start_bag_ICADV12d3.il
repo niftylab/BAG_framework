@@ -2182,56 +2182,96 @@ procedure( adel_modify_testbench(tb_lib tb_cell conf_file opt_file corner_file s
     ;)
 )
 
-; run an ade-l simulation
-procedure( adel_run_simulation(tb_lib tb_cell res_file_name @optional (tb_ade_view "spectre_state1"))
-    sprintf(session_name "bag_sim_adel_%s" getCurrentTime())
-    sev_sess_sess = open_adel_session(tb_lib tb_cell "config" tb_ade_view session_name "a")
-    sev_session = car(sev_sess_sess)
-    session = cadr(sev_sess_sess)
-    ;asiNetlist(session)
-    ;asiRunSimulation(session)
-    sevNetlistAndRun(sev_session)
-    ;wait until the simulation is completed.
-    finish = nil
-    while( !finish
-        sleep(5)  ; wait to allow the simulation to run.
-        ; load the log file.
+; run an ade-l simulation.
+; Polls the CIW log until the ADE-L run finishes.  A failed netlist/run or a
+; poll timeout closes the ADE session and raises error() instead of polling
+; forever, so a failed run no longer blocks the BAG skill server until
+; Virtuoso is restarted.  timeout bounds the total wait in seconds; after the
+; first error line polling continues only err_grace more seconds in case the
+; completion message still arrives (recoverable errors lose to a success).
+procedure( adel_run_simulation(tb_lib tb_cell res_file_name @optional (tb_ade_view "spectre_state1") (timeout 3600) (err_grace 30))
+    let( (session_name sev_sess_sess sev_session session p line start_line
+          log_lines line_no finish fail_reason elapsed deadline out_list state_obj)
+        sprintf(session_name "bag_sim_adel_%s" getCurrentTime())
+        ; remember how many log lines exist before the run starts so only
+        ; output from this run is scanned: a stale ADE-3071/error line from a
+        ; previous run in the same session must not affect this run.
+        start_line = 0
         p = infile( hiGetLogFileName())
-        log_list = list()
         when( p
             while( gets( line p )
-                log_list = append1(log_list line)
+                start_line = start_line + 1
             ); while
+            close(p)
         );when
-        log_list_length = length(log_list)
-        ; check the recent 40 lines and see if the simulation finish message exists.
-        for(log_list_i 1 40
-            ;printf("%s\n" nth(log_list_length-log_list_i log_list))
-            'print(nth(log_list_length-log_list_i log_list))
-            ;printf("\n")
-            if((nth(log_list_length-log_list_i log_list)=="\\o INFO (ADE-3071): Simulation completed successfully.\n") then
-                printf( "*INFO* Simulation completed \n") 
-                finish = 't
+        sev_sess_sess = open_adel_session(tb_lib tb_cell "config" tb_ade_view session_name "a")
+        sev_session = car(sev_sess_sess)
+        session = cadr(sev_sess_sess)
+        ;asiNetlist(session)
+        ;asiRunSimulation(session)
+        sevNetlistAndRun(sev_session)
+        ;wait until the simulation is completed, failed, or timed out.
+        finish = nil
+        fail_reason = nil
+        elapsed = 0
+        deadline = timeout
+        while( !finish && elapsed < deadline
+            sleep(5)  ; wait to allow the simulation to run.
+            elapsed = elapsed + 5
+            ; load the log lines appended after the run started.
+            log_lines = list()
+            line_no = 0
+            p = infile( hiGetLogFileName())
+            when( p
+                while( gets( line p )
+                    line_no = line_no + 1
+                    when( line_no > start_line
+                        log_lines = append1(log_lines line)
+                    );when
+                ); while
+                close(p)
+            );when
+            foreach( log_line log_lines
+                cond(
+                    ( index(log_line "INFO (ADE-3071): Simulation completed successfully.")
+                        printf( "*INFO* Simulation completed \n")
+                        finish = 't
+                    )
+                    ( !fail_reason && (index(log_line "ERROR (") || index(log_line "*Error*") || substring(log_line 1 2) == "\\e")
+                        fail_reason = log_line
+                    )
+                );cond
+            );foreach
+            ; after the first error line keep polling only a short grace
+            ; period in case the completion message still arrives.
+            when( fail_reason && deadline > elapsed + err_grace
+                deadline = elapsed + err_grace
+            );when
+        ); while
+        unless( finish
+            errset(sevQuit(sev_session) t)
+            unless( fail_reason
+                sprintf(fail_reason "no completion message within %L seconds" timeout)
+            );unless
+            error("adel_run_simulation failed for %s__%s: %s" tb_lib tb_cell fail_reason)
+        );unless
+        ; read out the results.
+        out_list=asiGetOutputList(session)
+        p = outfile( res_file_name "w" )
+        foreach( out out_list
+            if((out~>name) then
+                fprintf( p "%s: %L\n" out~>name out~>value )
             );if
-        );for 
+        );foreach
         close(p)
-    ); while
-    ; read out the results.
-    out_list=asiGetOutputList(session)
-    p = outfile( res_file_name "w" )
-    foreach( out out_list
-        if((out~>name) then
-            fprintf( p "%s: %L\n" out~>name out~>value )
-        );if
-    );foreach
-    close(p)
-    ; delete original ade view to update
-    state_obj = ddGetObj(tb_lib tb_cell tb_ade_view)
-    ddDeleteObj(state_obj)
+        ; delete original ade view to update
+        state_obj = ddGetObj(tb_lib tb_cell tb_ade_view)
+        ddDeleteObj(state_obj)
 
-    ; save and close
-    asiSaveState(session ?name tb_ade_view ?option 'cellview ?lib tb_lib ?cell tb_cell)
-    sevQuit(sev_session)
+        ; save and close
+        asiSaveState(session ?name tb_ade_view ?option 'cellview ?lib tb_lib ?cell tb_cell)
+        sevQuit(sev_session)
+    );let
 );procedure
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
