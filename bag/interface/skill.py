@@ -288,6 +288,26 @@ class SkillInterface(DbAccess):
 
         return self._eval_skill(cmd, input_files=in_files)
 
+    # default ADE session flavor for this interface class; the
+    # ``testbench.flavor`` entry of the database configuration overrides it.
+    ade_flavor_default = 'adexl'
+
+    _ade_session = None
+
+    @property
+    def ade_session(self):
+        """The AdeSession flavor driving this interface's testbench operations.
+
+        See :mod:`bag.interface.ade` for the available flavors (ADE-XL,
+        ADE-L, Maestro).
+        """
+        if self._ade_session is None:
+            from .ade import create_ade_session
+            flavor = self.db_config.get('testbench', {}).get(
+                'flavor', self.ade_flavor_default)
+            self._ade_session = create_ade_session(flavor, self)
+        return self._ade_session
+
     def configure_testbench(self, tb_lib, tb_cell):
         """Update testbench state for the given testbench.
 
@@ -309,24 +329,7 @@ class SkillInterface(DbAccess):
         parameters : dict[str, str]
             a list of testbench parameter values, represented as string.
         """
-        tb_config = self.db_config['testbench']
-
-        cmd = ('instantiate_testbench("{tb_cell}" "{targ_lib}" ' +
-               '"{config_libs}" "{config_views}" "{config_stops}" ' +
-               '"{default_corner}" "{corner_file}" {def_files} ' +
-               '"{tech_lib}" {result_file})')
-        cmd = cmd.format(tb_cell=tb_cell,
-                         targ_lib=tb_lib,
-                         config_libs=tb_config['config_libs'],
-                         config_views=tb_config['config_views'],
-                         config_stops=tb_config['config_stops'],
-                         default_corner=tb_config['default_env'],
-                         corner_file=tb_config['env_file'],
-                         def_files=to_skill_list_str(tb_config['def_files']),
-                         tech_lib=self.db_config['schematic']['tech_lib'],
-                         result_file='{result_file}')
-        output = yaml.load(self._eval_skill(cmd, out_file='result_file'), Loader=yaml.FullLoader)
-        return tb_config['default_env'], output['corners'], output['parameters'], output['outputs']
+        return self.ade_session.configure_testbench(tb_lib, tb_cell)
 
     def get_testbench_info(self, tb_lib, tb_cell):
         """Returns information about an existing testbench.
@@ -349,12 +352,7 @@ class SkillInterface(DbAccess):
         outputs : dict[str, str]
             a list of testbench output expressions.
         """
-        cmd = 'get_testbench_info("{tb_lib}" "{tb_cell}" {result_file})'
-        cmd = cmd.format(tb_lib=tb_lib,
-                         tb_cell=tb_cell,
-                         result_file='{result_file}')
-        output = yaml.load(self._eval_skill(cmd, out_file='result_file'), Loader=yaml.FullLoader)
-        return output['enabled_corners'], output['corners'], output['parameters'], output['outputs']
+        return self.ade_session.get_testbench_info(tb_lib, tb_cell)
 
     def update_testbench(self,
                          lib,  # type: str
@@ -382,16 +380,19 @@ class SkillInterface(DbAccess):
         env_parameters : List[List[Tuple[str, str]]]
             list of param/value list for each simulation environment.
         """
+        self.ade_session.update_testbench(lib, cell, parameters, sim_envs,
+                                          config_rules, env_parameters)
 
-        cmd = ('modify_testbench("%s" "%s" {conf_rules} {run_opts} '
-               '{sim_envs} {params} {env_params})' % (lib, cell))
-        in_files = {'conf_rules': config_rules,
-                    'run_opts': [],
-                    'sim_envs': sim_envs,
-                    'params': list(parameters.items()),
-                    'env_params': list(zip(sim_envs, env_parameters)),
-                    }
-        self._eval_skill(cmd, input_files=in_files)
+    def run_simulation(self, lib, cell, res_file_name=None):
+        """Run a simulation through the ADE session.
+
+        Only session flavors that drive the run through the skill server
+        (currently ADE-L) implement this; other flavors raise
+        ``NotImplementedError`` because their simulations go through the
+        simulation interface instead.
+        """
+        return self.ade_session.run_simulation(lib, cell,
+                                               res_file_name=res_file_name)
 
     def instantiate_layout_pcell(self, lib_name, cell_name, view_name,
                                  inst_lib, inst_cell, params, pin_mapping):
@@ -622,8 +623,11 @@ class SkillInterface(DbAccess):
 class ADELSkillInterface(SkillInterface):
     """ADE-L & Skill interface between bag and Virtuoso.
 
-    This class sends all bag's database and simulation operations to
-    an external Virtuoso process, then get the result from it.
+    Backward-compatible entry point kept for existing ``bag_config.yaml``
+    files: identical to :class:`SkillInterface` except that the default ADE
+    session flavor is ADE-L (:class:`bag.interface.ade.AdelSession`), which
+    opens the testbench in place and drives ``adel_run_simulation`` through
+    the skill server.
 
     Parameters
     ----------
@@ -635,102 +639,9 @@ class ADELSkillInterface(SkillInterface):
         the database configuration dictionary.
     """
 
-    lib_name = None   # library name
-    cell_name = None  # cell name
+    ade_flavor_default = 'adel'
 
-    def configure_testbench(self, tb_lib, tb_cell):
-        """Update testbench state for the given testbench.
-
-        This method fill in process-specific information for the given testbench.
-
-        Parameters
-        ----------
-        tb_lib : str
-            testbench library name.
-        tb_cell : str
-            testbench cell name.
-
-        Returns
-        -------
-        cur_env : str
-            the current simulation environment.
-        envs : list[str]
-            a list of available simulation environments.
-        parameters : dict[str, str]
-            a list of testbench parameter values, represented as string.
-        """
-        self.lib_name = tb_lib
-        self.cell_name = tb_cell
-
-        tb_config = self.db_config['testbench']
-
-        cmd = ('adel_instantiate_testbench("{tb_cell}" "{targ_lib}" ' +
-               '"{config_libs}" "{config_views}" "{config_stops}" ' +
-               '"{default_corner}" "{corner_file}" {def_files} ' +
-               '"{tech_lib}" {result_file})')
-        cmd = cmd.format(tb_cell=tb_cell,
-                         targ_lib=tb_lib,
-                         config_libs=tb_config['config_libs'],
-                         config_views=tb_config['config_views'],
-                         config_stops=tb_config['config_stops'],
-                         default_corner=tb_config['default_env'],
-                         corner_file=tb_config['env_file'],
-                         def_files=to_skill_list_str(tb_config['def_files']),
-                         tech_lib=self.db_config['schematic']['tech_lib'],
-                         result_file='{result_file}')
-        output = yaml.load(self._eval_skill(cmd, out_file='result_file'), Loader=yaml.FullLoader)
-        return tb_config['default_env'], output['corners'], output['parameters'], output['outputs']
-
-    def update_testbench(self,
-                         lib,  # type: str
-                         cell,  # type: str
-                         parameters,  # type: Dict[str, str]
-                         sim_envs,  # type: List[str]
-                         config_rules,  # type: List[List[str]]
-                         env_parameters  # type: List[List[Tuple[str, str]]]
-                         ):
-        # type: (...) -> None
-        """Update the given testbench configuration.
-
-        Parameters
-        ----------
-        lib : str
-            testbench library.
-        cell : str
-            testbench cell.
-        parameters : Dict[str, str]
-            testbench parameters.
-        sim_envs : List[str]
-            list of enabled simulation environments.
-        config_rules : List[List[str]]
-            config view mapping rules, list of (lib, cell, view) rules.
-        env_parameters : List[List[Tuple[str, str]]]
-            list of param/value list for each simulation environment.
-        """
-
-        tb_config = self.db_config['testbench']
-        corner_file=tb_config['env_file']
-        cmd = ('adel_modify_testbench("%s" "%s" {conf_rules} {run_opts} "%s" '
-               '{sim_envs} {params} {env_params})' % (lib, cell, corner_file))
-        in_files = {'conf_rules': config_rules,
-                    'run_opts': [],
-                    'sim_envs': sim_envs,
-                    'params': list(parameters.items()),
-                    'env_params': list(zip(sim_envs, env_parameters)),
-                    }
-        self._eval_skill(cmd, input_files=in_files)
-
-    def run_simulation(self, lib, cell, res_file_name=None):
-        """Run ADE-L simulation"""
-        if res_file_name is None:
-            res_file_name = 'sim_results.yaml'
-        save_dir = bag.io.make_temp_dir(prefix='adel_data', parent_dir=self.tmp_dir) 
-        save_full_path = save_dir + '/' + res_file_name
-        cmd = ('adel_run_simulation("%s" "%s" "%s")' % (lib, cell, save_full_path))
-        self._eval_skill(cmd)
-        if os.path.exists(save_full_path):
-            with open(save_full_path, 'r') as stream:
-                results = yaml.load(stream, Loader=yaml.FullLoader)
-        return results
+    lib_name = None   # library name of the last configured testbench
+    cell_name = None  # cell name of the last configured testbench
 
 
