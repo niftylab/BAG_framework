@@ -341,13 +341,17 @@ class Testbench(object):
         value : Optional[str]
             the save directory path.  If simulation is cancelled, return None.
         """
-        '''
-        coro = self.async_run_simulation(precision=precision, sim_tag=sim_tag)
-        batch_async_task([coro])
-        return self.save_dir
-        '''
-        self.results = self.db.run_simulation(self.lib, self.cell)
-        return self.results
+        try:
+            self.results = self.db.run_simulation(self.lib, self.cell)
+            return self.results
+        except NotImplementedError:
+            # ADE flavors whose runs do not go through the skill server
+            # (ADE-XL / Maestro) run as an ocean batch subprocess through the
+            # simulation interface; sim_config's view/state select the
+            # assembler cellview the ocean script targets.
+            coro = self.async_run_simulation(precision=precision, sim_tag=sim_tag)
+            batch_async_task([coro])
+            return self.save_dir
 
     def load_sim_results(self, hist_name, precision=6):
         # type: (str, int) -> Optional[str]

@@ -136,7 +136,11 @@ procedure( save_waveform(directory var_name wave precision data_list_struct)
 
 ocnSetXLMode()
 ocnxlTargetCellView(lib cell view)
-ocnxlLoadSetupState(state 'overwrite)
+; maestro views carry their own active setup; only load a named saved
+; state when one is configured (sim_config 'state').
+when( strlen(state) > 0
+    ocnxlLoadSetupState(state 'overwrite)
+)
 ocnxlHistoryPrefix(sim_tag)
 ocnxlJobSetup(job_opt_list)
 printf("*Info* Creating netlist...\n")

@@ -373,32 +373,16 @@ class MaestroSession(AdexlSession):
                          env_parameters  # type: List[List[Tuple[str, str]]]
                          ):
         # type: (...) -> None
-        """Update corners, parameters, and run options of a maestro testbench.
+        """Maestro setups run exactly as saved; setup writes are skipped.
 
-        Parameters
-        ----------
-        lib : str
-            testbench library.
-        cell : str
-            testbench cell.
-        parameters : Dict[str, str]
-            testbench parameters.
-        sim_envs : List[str]
-            list of enabled simulation environments.
-        config_rules : List[List[str]]
-            config view mapping rules, list of (lib, cell, view) rules.
-        env_parameters : List[List[Tuple[str, str]]]
-            list of param/value list for each simulation environment.
+        The axl write path (axlSaveSetupState & friends) crashes IC618's
+        setupdb on maestro views (SDB::setCurrentRunMode assertion,
+        observed 2026-08-09), so the assembler setup is used exactly as
+        authored in Virtuoso.  Parameter, corner, or config-binding changes
+        must be made in the maestro view itself.
         """
-        cmd = ('maestro_modify_testbench("%s" "%s" {conf_rules} {run_opts} '
-               '{sim_envs} {params} {env_params})' % (lib, cell))
-        in_files = {'conf_rules': config_rules,
-                    'run_opts': [],
-                    'sim_envs': sim_envs,
-                    'params': list(parameters.items()),
-                    'env_params': list(zip(sim_envs, env_parameters)),
-                    }
-        self._eval_skill(cmd, input_files=in_files)
+        print('*WARNING* maestro testbench %s__%s runs with its saved setup; '
+              'skipping setup modification.' % (lib, cell))
 
 
 SESSION_CLASSES = {cls.flavor: cls
