@@ -312,13 +312,38 @@ procedure( modify_testbench(tb_lib tb_cell conf_file opt_file corner_file param_
 ; The setup database is opened in "a" mode on purpose: a read-only
 ; session executes the run but discards the history, leaving no rdb to
 ; read (observed on IC618, 2026-08-10).
+;
+; ocean-XL-authored setups (cf. laygo2 clkdiv_tb_adexl_author.ocn) leave
+; the run mode unset (no <currentmode> in the setup database);
+; axlRunSimulation then submits zero points and the ICRP job client
+; idles empty-handed until the python-side timeout (observed on IC618,
+; 2026-08-11; corners are enabled by default -- axlGetEnabled returns t
+; even without an enabled= attribute -- so the run mode is the only
+; missing piece).  When the run mode is empty, set the default
+; single-run mode, persist it the way modify_testbench does, and reopen
+; the setup so the run submission reads the committed state.  Setups
+; that already carry a run mode (e.g. GUI-configured or maestro views)
+; are left untouched.
 procedure( adexl_start_simulation(tb_lib tb_cell @optional (tb_view "adexl"))
-    let( (session_name)
+    let( (session_name session_sdb session sdb mode)
         sprintf(session_name "bag_axl_%s_%s" tb_lib tb_cell)
         ; a stale same-name session (e.g. from an interrupted earlier run)
         ; blocks axlCreateSession; drop it first.
         errset(axlCloseSession(session_name))
-        open_adexl_session(tb_lib tb_cell tb_view session_name "a")
+        session_sdb = open_adexl_session(tb_lib tb_cell tb_view session_name "a")
+        session = car(session_sdb)
+        sdb = cadr(session_sdb)
+        mode = errset(axlGetCurrentRunMode(sdb))
+        mode = when( mode car(mode) )
+        when( null(mode) || mode == ""
+            axlSetCurrentRunMode(sdb "Single Run, Sweeps and Corners")
+            axlSaveSetupState(session "adexl_default" "All")
+            axlMainAppSaveSetup(session_name)
+            axlCommitSetupDB(sdb)
+            axlCloseSetupDB(sdb)
+            axlCloseSession(session)
+            open_adexl_session(tb_lib tb_cell tb_view session_name "a")
+        )
         axlRunSimulation(?session session_name)
         session_name
     )
