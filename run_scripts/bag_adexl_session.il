@@ -294,3 +294,39 @@ procedure( modify_testbench(tb_lib tb_cell conf_file opt_file corner_file param_
         axlCloseSession(session)
     )
 )
+
+; ---------------------------------------------------------------------------
+; BAG-driven ADE-XL run submission (bypasses the ocean batch path, which
+; needs a provisioned job policy this site does not have).
+;
+; axlRunSimulation executes asynchronously: the main session dispatches
+; ICRP job virtuosos, evaluates the outputs when the jobs report back,
+; and saves the run history into the view's results database
+; (<lib>/<cell>/adexl/results/data/*.rdb, a SQLite file).  This
+; procedure therefore only submits the run and returns immediately; the
+; python caller (bag.interface.ade.AdexlSession) watches the rdb for
+; completion and reads the evaluated outputs from it directly.  Blocking
+; here would starve the very event processing that finishes the run --
+; the same event-loop race adel_run_simulation suffers from.
+;
+; The setup database is opened in "a" mode on purpose: a read-only
+; session executes the run but discards the history, leaving no rdb to
+; read (observed on IC618, 2026-08-10).
+procedure( adexl_start_simulation(tb_lib tb_cell @optional (tb_view "adexl"))
+    let( (session_name)
+        sprintf(session_name "bag_axl_%s_%s" tb_lib tb_cell)
+        ; a stale same-name session (e.g. from an interrupted earlier run)
+        ; blocks axlCreateSession; drop it first.
+        errset(axlCloseSession(session_name))
+        open_adexl_session(tb_lib tb_cell tb_view session_name "a")
+        axlRunSimulation(?session session_name)
+        session_name
+    )
+)
+
+; Closes the session opened by adexl_start_simulation, releasing the
+; "a"-mode setup database so the view can be edited elsewhere.
+procedure( adexl_close_simulation(session_name)
+    errset(axlCloseSession(session_name) t)
+    t
+)

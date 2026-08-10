@@ -13,7 +13,10 @@ database configuration (falling back to the interface class default).
 
 from typing import List, Dict, Optional, Tuple
 
+import glob
 import os
+import sqlite3
+import time
 
 import yaml
 
@@ -69,11 +72,25 @@ class AdeSession(object):
 class AdexlSession(AdeSession):
     """ADE-XL session flavor (``bag_adexl_session.il`` function family).
 
-    Simulations themselves run through the simulation interface
-    (e.g. :class:`bag.interface.ocean.OceanInterface`), not this class.
+    ``run_simulation`` drives the view's saved setup through
+    ``axlRunSimulation`` in the live Virtuoso session.  The run is
+    asynchronous on the SKILL side (ICRP job sessions execute the points
+    and the main session saves the history), so completion is detected
+    here by watching the view's history result database instead of
+    blocking inside SKILL -- a blocking SKILL call would starve the very
+    event processing that finishes the run.  Requires a display-attached
+    Virtuoso: without a provisioned job policy, ICRP jobs are only
+    dispatched in GUI sessions.
     """
 
     flavor = 'adexl'
+
+    #: cellview holding the ADE setup (:class:`MaestroSession` differs).
+    tb_view = 'adexl'
+    #: seconds to wait for the run history database before giving up.
+    sim_timeout = 3600.0
+    #: seconds between history database polls.
+    sim_poll_interval = 5.0
 
     def configure_testbench(self, tb_lib, tb_cell):
         """Update testbench state for the given testbench.
@@ -179,6 +196,112 @@ class AdexlSession(AdeSession):
                     'env_params': list(zip(sim_envs, env_parameters)),
                     }
         self._eval_skill(cmd, input_files=in_files)
+
+    def run_simulation(self, lib, cell, res_file_name=None):
+        """Run the testbench's saved ADE-XL setup and return its outputs.
+
+        Parameters
+        ----------
+        lib : str
+            testbench library.
+        cell : str
+            testbench cell.
+        res_file_name : str or None
+            unused (results are read from the history database); kept for
+            signature compatibility with :class:`AdelSession`.
+
+        Returns
+        -------
+        results : dict[str, float]
+            evaluated output expression values.  For multi-point runs
+            (several corners/sweep points) each value is a dict keyed by
+            the run's point ID instead of a scalar.
+        """
+        lib_path = self._eval_skill('ddGetObj("%s")~>readPath' % lib).strip().strip('"')
+        if not os.path.isdir(lib_path):
+            raise Exception('run_simulation: cannot resolve library path '
+                            'of %s (got %r)' % (lib, lib_path))
+        rdb_dir = os.path.join(lib_path, cell, self.tb_view, 'results', 'data')
+
+        # snapshot the history databases before submitting so completion is
+        # detected as a change against this baseline.  Comparing file mtimes
+        # against the local clock does not work here: NFS stamps the files
+        # with the file server's clock, which can differ from the client
+        # host's by minutes.
+        baseline = self._rdb_snapshot(rdb_dir)
+        session_name = self._eval_skill(
+            'adexl_start_simulation("%s" "%s" "%s")'
+            % (lib, cell, self.tb_view)).strip().strip('"')
+        try:
+            return self._wait_for_results(rdb_dir, baseline, lib, cell)
+        finally:
+            self._eval_skill('adexl_close_simulation("%s")' % session_name)
+
+    @staticmethod
+    def _rdb_snapshot(rdb_dir):
+        """Return {path: (mtime, size)} for the history databases."""
+        snap = {}
+        for fname in glob.glob(os.path.join(rdb_dir, '*.rdb')):
+            try:
+                st = os.stat(fname)
+            except OSError:
+                continue
+            snap[fname] = (st.st_mtime, st.st_size)
+        return snap
+
+    def _wait_for_results(self, rdb_dir, baseline, lib, cell):
+        """Poll the history databases until one changes and is readable."""
+        deadline = time.time() + self.sim_timeout
+        while time.time() < deadline:
+            time.sleep(self.sim_poll_interval)
+            for fname, state in sorted(self._rdb_snapshot(rdb_dir).items()):
+                if baseline.get(fname) == state:
+                    continue
+                results = self._read_history_results(fname)
+                if results is not None:
+                    return results
+        raise Exception(
+            'adexl run for %s__%s produced no history result database in '
+            '%s within %g seconds; check the ADE-XL job logs '
+            '(logs_*/logs*/Job*.log in the workspace).'
+            % (lib, cell, rdb_dir, self.sim_timeout))
+
+    @staticmethod
+    def _read_history_results(rdb_file):
+        """Read evaluated outputs from a history rdb (SQLite) file.
+
+        Returns None while the database is still being written or has no
+        result rows yet; raises if the run recorded evaluation errors.
+        """
+        try:
+            con = sqlite3.connect('file:%s?mode=ro' % rdb_file, uri=True)
+        except sqlite3.Error:
+            return None
+        try:
+            try:
+                rows = con.execute(
+                    'SELECT v.pointID, r.name, v.value, v.errorID '
+                    'FROM result r JOIN resultValue v '
+                    'ON r.resultID = v.resultID').fetchall()
+            except sqlite3.Error:
+                return None
+            if not rows:
+                return None
+            failed = sorted({name for _p, name, _v, err in rows
+                             if err is not None})
+            if failed:
+                raise Exception('adexl run recorded evaluation errors for '
+                                'outputs: %s (see %s)'
+                                % (', '.join(failed), rdb_file))
+            points = sorted({p for p, _n, _v, _e in rows})
+            if len(points) <= 1:
+                return {name: value for _p, name, value, _e in rows}
+            multi = {}
+            for point, name, value, _err in rows:
+                multi.setdefault(name, {})[point] = value
+            return multi
+        finally:
+            con.close()
 
 
 class AdelSession(AdexlSession):
@@ -383,6 +506,19 @@ class MaestroSession(AdexlSession):
         """
         print('*WARNING* maestro testbench %s__%s runs with its saved setup; '
               'skipping setup modification.' % (lib, cell))
+
+    def run_simulation(self, lib, cell, res_file_name=None):
+        """Maestro runs still go through the Ocean simulation interface.
+
+        The axl run submission now proven for ADE-XL views would need a
+        write-mode open of the maestro setup database, and maestro setupdb
+        writes crash IC618 in headless sessions (sdbaccess.cpp:514).  A
+        GUI-attached session may tolerate it, but that is unverified, so
+        keep raising to preserve the ocean batch fallback.
+        """
+        raise NotImplementedError(
+            '%s does not run simulations through the database interface; '
+            'use the simulation interface instead.' % type(self).__name__)
 
 
 SESSION_CLASSES = {cls.flavor: cls
