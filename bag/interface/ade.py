@@ -87,10 +87,21 @@ class AdexlSession(AdeSession):
 
     #: cellview holding the ADE setup (:class:`MaestroSession` differs).
     tb_view = 'adexl'
+    #: subdirectory of ``<cell>/<tb_view>/results`` holding the run
+    #: history databases ('data' for adexl, 'maestro' for maestro views).
+    results_subdir = 'data'
     #: seconds to wait for the run history database before giving up.
     sim_timeout = 3600.0
     #: seconds between history database polls.
     sim_poll_interval = 5.0
+    #: seconds to keep polling after the first job-log error line, in case
+    #: the run still completes (e.g. only some points failed).
+    sim_err_grace = 30.0
+    #: glob (relative to the workspace root the client runs from) of the
+    #: ICRP job logs watched for run errors.  Runs that die before writing
+    #: a history database (netlist errors, license failures) only surface
+    #: here; without this the poll would sit out the full timeout.
+    job_log_glob = os.path.join('logs_*', 'logs*', 'Job*.log')
 
     def configure_testbench(self, tb_lib, tb_cell):
         """Update testbench state for the given testbench.
@@ -221,7 +232,8 @@ class AdexlSession(AdeSession):
         if not os.path.isdir(lib_path):
             raise Exception('run_simulation: cannot resolve library path '
                             'of %s (got %r)' % (lib, lib_path))
-        rdb_dir = os.path.join(lib_path, cell, self.tb_view, 'results', 'data')
+        rdb_dir = os.path.join(lib_path, cell, self.tb_view, 'results',
+                               self.results_subdir)
 
         # snapshot the history databases before submitting so completion is
         # detected as a change against this baseline.  Comparing file mtimes
@@ -229,11 +241,13 @@ class AdexlSession(AdeSession):
         # with the file server's clock, which can differ from the client
         # host's by minutes.
         baseline = self._rdb_snapshot(rdb_dir)
+        log_sizes = self._job_log_sizes()
         session_name = self._eval_skill(
             'adexl_start_simulation("%s" "%s" "%s")'
             % (lib, cell, self.tb_view)).strip().strip('"')
         try:
-            return self._wait_for_results(rdb_dir, baseline, lib, cell)
+            return self._wait_for_results(rdb_dir, baseline, log_sizes,
+                                          lib, cell)
         finally:
             self._eval_skill('adexl_close_simulation("%s")' % session_name)
 
@@ -249,9 +263,46 @@ class AdexlSession(AdeSession):
             snap[fname] = (st.st_mtime, st.st_size)
         return snap
 
-    def _wait_for_results(self, rdb_dir, baseline, lib, cell):
-        """Poll the history databases until one changes and is readable."""
+    def _job_log_sizes(self):
+        """Return {path: size} for the ICRP job logs."""
+        sizes = {}
+        for fname in glob.glob(self.job_log_glob):
+            try:
+                sizes[fname] = os.path.getsize(fname)
+            except OSError:
+                continue
+        return sizes
+
+    def _scan_job_logs(self, log_sizes):
+        """Return the first error line appended to a job log, or None.
+
+        ``log_sizes`` tracks how far each log has been read and is updated
+        in place.
+        """
+        for fname in glob.glob(self.job_log_glob):
+            offset = log_sizes.get(fname, 0)
+            try:
+                with open(fname, 'r', errors='replace') as stream:
+                    stream.seek(offset)
+                    chunk = stream.read()
+                    log_sizes[fname] = stream.tell()
+            except OSError:
+                continue
+            for line in chunk.splitlines():
+                if 'ERROR (' in line or '*Error*' in line:
+                    return '%s: %s' % (fname, line.strip())
+        return None
+
+    def _wait_for_results(self, rdb_dir, baseline, log_sizes, lib, cell):
+        """Poll the history databases until one changes and is readable.
+
+        Job logs are watched alongside: after the first error line the
+        deadline shrinks to a short grace period, so runs that die without
+        writing a history database fail fast instead of sitting out the
+        full timeout.
+        """
         deadline = time.time() + self.sim_timeout
+        fail_reason = None
         while time.time() < deadline:
             time.sleep(self.sim_poll_interval)
             for fname, state in sorted(self._rdb_snapshot(rdb_dir).items()):
@@ -260,11 +311,19 @@ class AdexlSession(AdeSession):
                 results = self._read_history_results(fname)
                 if results is not None:
                     return results
+            if fail_reason is None:
+                fail_reason = self._scan_job_logs(log_sizes)
+                if fail_reason is not None:
+                    deadline = min(deadline,
+                                   time.time() + self.sim_err_grace)
+        if fail_reason is not None:
+            raise Exception('adexl run for %s__%s failed: %s'
+                            % (lib, cell, fail_reason))
         raise Exception(
             'adexl run for %s__%s produced no history result database in '
             '%s within %g seconds; check the ADE-XL job logs '
-            '(logs_*/logs*/Job*.log in the workspace).'
-            % (lib, cell, rdb_dir, self.sim_timeout))
+            '(%s in the workspace).'
+            % (lib, cell, rdb_dir, self.sim_timeout, self.job_log_glob))
 
     @staticmethod
     def _read_history_results(rdb_file):
@@ -285,6 +344,12 @@ class AdexlSession(AdeSession):
                     'ON r.resultID = v.resultID').fetchall()
             except sqlite3.Error:
                 return None
+            if not rows:
+                return None
+            # maestro histories also list saved signal traces (rows named
+            # after nets, with no value); only output expressions carry
+            # values ('wave' for waveform outputs).
+            rows = [row for row in rows if row[2] not in (None, '')]
             if not rows:
                 return None
             failed = sorted({name for _p, name, _v, err in rows
@@ -429,9 +494,9 @@ class MaestroSession(AdexlSession):
     cellview.  The maestro view (``maestro.sdb`` + ``active.state``) is
     authored in Virtuoso and opened in place, so there is no separate
     instantiate step: ``configure_testbench`` reads the existing setup the
-    same way ``get_testbench_info`` does.  As with ADE-XL, the simulation
-    itself runs through the Ocean simulation interface, not the skill
-    server, so ``run_simulation`` is inherited (and raises).
+    same way ``get_testbench_info`` does.  ``run_simulation`` is the axl
+    run submission inherited from :class:`AdexlSession`, pointed at the
+    ``maestro`` view.
     """
 
     flavor = 'maestro'
@@ -507,18 +572,16 @@ class MaestroSession(AdexlSession):
         print('*WARNING* maestro testbench %s__%s runs with its saved setup; '
               'skipping setup modification.' % (lib, cell))
 
-    def run_simulation(self, lib, cell, res_file_name=None):
-        """Maestro runs still go through the Ocean simulation interface.
-
-        The axl run submission now proven for ADE-XL views would need a
-        write-mode open of the maestro setup database, and maestro setupdb
-        writes crash IC618 in headless sessions (sdbaccess.cpp:514).  A
-        GUI-attached session may tolerate it, but that is unverified, so
-        keep raising to preserve the ocean batch fallback.
-        """
-        raise NotImplementedError(
-            '%s does not run simulations through the database interface; '
-            'use the simulation interface instead.' % type(self).__name__)
+    #: maestro views share the axl run submission inherited from
+    #: :class:`AdexlSession`.  The maestro setup-database writes that
+    #: crash IC618 headlessly (sdbaccess.cpp:514) do not reproduce in a
+    #: display-attached session: a write-mode open of the maestro view and
+    #: the run-history save both work there (verified 2026-08-10), which
+    #: is the same environment the run submission requires anyway for ICRP
+    #: job dispatch.
+    tb_view = 'maestro'
+    #: maestro histories live under results/maestro, not results/data.
+    results_subdir = 'maestro'
 
 
 SESSION_CLASSES = {cls.flavor: cls
