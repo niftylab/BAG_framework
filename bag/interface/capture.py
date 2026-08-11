@@ -115,6 +115,7 @@ class TestbenchScreenCapture(object):
         self._opened_sch = False
         self._opened_adel = False
         self._opened_lay = False
+        self._opened_plot = False
 
     # ------------------------------------------------------------------
     # window opening (read-only)
@@ -169,6 +170,7 @@ class TestbenchScreenCapture(object):
         self._ev("selectResult('tran)")
         self._ev('errset(newWindow() t)')
         self._ev('plot(%s)' % ' '.join('v("%s")' % s for s in signals))
+        self._opened_plot = True
 
     # ------------------------------------------------------------------
     # capture
@@ -220,6 +222,7 @@ class TestbenchScreenCapture(object):
 
     def close(self):
         """Close every window this instance opened; never saves anything."""
+        touched_viva = self._opened_adel or self._opened_plot
         if self._opened_adel:
             self._ev('errset(sevQuit(__bag_cap_sev) t)')
             self._opened_adel = False
@@ -229,4 +232,9 @@ class TestbenchScreenCapture(object):
         if self._opened_lay:
             self._ev('errset(hiCloseWindow(__bag_cap_lay) t)')
             self._opened_lay = False
-        self._ev('errset(awvCloseAll() t)')
+        if touched_viva:
+            # only when this instance touched ViVA (a state load can auto-plot,
+            # and plot_transient always does) — never on pure window captures,
+            # which must not close unrelated waveform windows
+            self._ev('errset(awvCloseAll() t)')
+            self._opened_plot = False
