@@ -57,11 +57,13 @@ procedure( maestro_get_testbench_info(tb_lib tb_cell result_file "ttt")
 
 ; Modify corners, parameters, and run options of a maestro testbench.
 ;
-; WARNING: do not call this on IC618 -- the axl write path
-; (axlSaveSetupState & friends) crashes setupdb on maestro views
-; (SDB::setCurrentRunMode assertion, observed 2026-08-09).  Maestro
-; setups run exactly as saved; edit the maestro view in Virtuoso instead.
-; Kept for newer Virtuoso versions where the axl write path may be safe.
+; Requires the display-attached session, like every other maestro
+; operation here.  The setupdb crash that once ruled this path out
+; (SDB::setCurrentRunMode assertion, 2026-08-09) was a headless-only
+; failure: the same write sequence -- axlSetCurrentRunMode,
+; axlSaveSetupState, axlMainAppSaveSetup, axlCommitSetupDB -- runs on
+; maestro views in a GUI session, where adexl_start_simulation's run-mode
+; defaulting has been exercising it since 2026-08-11.
 procedure( maestro_modify_testbench(tb_lib tb_cell conf_file opt_file corner_file
                                     param_file env_params_file "ttttttt")
     modify_testbench(tb_lib tb_cell conf_file opt_file corner_file param_file

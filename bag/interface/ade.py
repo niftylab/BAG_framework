@@ -102,6 +102,9 @@ class AdexlSession(AdeSession):
     #: seconds to keep polling after the first job-log error line, in case
     #: the run still completes (e.g. only some points failed).
     sim_err_grace = 30.0
+    #: SKILL entry point ``update_testbench`` drives (:class:`MaestroSession`
+    #: overrides it with the maestro-view wrapper).
+    modify_fn = 'modify_testbench'
     #: glob (relative to the workspace root the client runs from) of the
     #: ICRP job logs watched for run errors.  Runs that die before writing
     #: a history database (netlist errors, license failures) only surface
@@ -203,8 +206,8 @@ class AdexlSession(AdeSession):
             list of param/value list for each simulation environment.
         """
 
-        cmd = ('modify_testbench("%s" "%s" {conf_rules} {run_opts} '
-               '{sim_envs} {params} {env_params})' % (lib, cell))
+        cmd = ('%s("%s" "%s" {conf_rules} {run_opts} '
+               '{sim_envs} {params} {env_params})' % (self.modify_fn, lib, cell))
         in_files = {'conf_rules': config_rules,
                     'run_opts': [],
                     'sim_envs': sim_envs,
@@ -557,9 +560,9 @@ class MaestroSession(AdexlSession):
     cellview.  The maestro view (``maestro.sdb`` + ``active.state``) is
     authored in Virtuoso and opened in place, so there is no separate
     instantiate step: ``configure_testbench`` reads the existing setup the
-    same way ``get_testbench_info`` does.  ``run_simulation`` is the axl
-    run submission inherited from :class:`AdexlSession`, pointed at the
-    ``maestro`` view.
+    same way ``get_testbench_info`` does.  ``update_testbench`` and
+    ``run_simulation`` are the inherited ADE-XL implementations, pointed at
+    the ``maestro`` view.
     """
 
     flavor = 'maestro'
@@ -615,25 +618,10 @@ class MaestroSession(AdexlSession):
         output = yaml.load(self._eval_skill(cmd, out_file='result_file'), Loader=yaml.FullLoader)
         return output['enabled_corners'], output['corners'], output['parameters'], output['outputs']
 
-    def update_testbench(self,
-                         lib,  # type: str
-                         cell,  # type: str
-                         parameters,  # type: Dict[str, str]
-                         sim_envs,  # type: List[str]
-                         config_rules,  # type: List[List[str]]
-                         env_parameters  # type: List[List[Tuple[str, str]]]
-                         ):
-        # type: (...) -> None
-        """Maestro setups run exactly as saved; setup writes are skipped.
-
-        The axl write path (axlSaveSetupState & friends) crashes IC618's
-        setupdb on maestro views (SDB::setCurrentRunMode assertion,
-        observed 2026-08-09), so the assembler setup is used exactly as
-        authored in Virtuoso.  Parameter, corner, or config-binding changes
-        must be made in the maestro view itself.
-        """
-        print('*WARNING* maestro testbench %s__%s runs with its saved setup; '
-              'skipping setup modification.' % (lib, cell))
+    #: setup writes go through the maestro-view wrapper of the ADE-XL
+    #: modify path (``bag_maestro_session.il``); the write itself is the
+    #: inherited :meth:`AdexlSession.update_testbench`.
+    modify_fn = 'maestro_modify_testbench'
 
     #: maestro views share the axl run submission inherited from
     #: :class:`AdexlSession`.  The maestro setup-database writes that
