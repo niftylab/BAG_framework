@@ -114,6 +114,7 @@ class TestbenchScreenCapture(object):
                         self._ev('getShellEnvVar("DISPLAY")').strip('"'))
         self._opened_sch = False
         self._opened_adel = False
+        self._opened_lay = False
 
     # ------------------------------------------------------------------
     # window opening (read-only)
@@ -128,6 +129,19 @@ class TestbenchScreenCapture(object):
         self._ev('hiSetCurrentWindow(__bag_cap_sch)')
         self._ev('errset(schZoomFit(1.0 0.9) t)')
         self._opened_sch = True
+
+    def open_layout(self, lib, cell, view="layout", size=(1400, 1000)):
+        """Open ``lib/cell/view`` in the layout editor (read mode) and fit it."""
+        self._ev('__bag_cap_lay = geOpen(?lib "%s" ?cell "%s" '
+                 '?view "%s" ?mode "r")' % (lib, cell, view))
+        self._ev('hiResizeWindow(__bag_cap_lay list(10:60 %d:%d))'
+                 % (10 + size[0], 60 + size[1]))
+        self._ev('hiSetCurrentWindow(__bag_cap_lay)')
+        # fit the design: zoom to the cellview bBox (no hiZoomFit in layout;
+        # hiZoomIn with an explicit box is what this Virtuoso provides)
+        self._ev('errset(hiZoomIn(__bag_cap_lay '
+                 'geGetWindowCellView(__bag_cap_lay)~>bBox) t)')
+        self._opened_lay = True
 
     def open_adel_state(self, lib, cell, config_view="config",
                         ade_state="spectre_state1", size=(1200, 760)):
@@ -212,4 +226,7 @@ class TestbenchScreenCapture(object):
         if self._opened_sch:
             self._ev('errset(hiCloseWindow(__bag_cap_sch) t)')
             self._opened_sch = False
+        if self._opened_lay:
+            self._ev('errset(hiCloseWindow(__bag_cap_lay) t)')
+            self._opened_lay = False
         self._ev('errset(awvCloseAll() t)')
