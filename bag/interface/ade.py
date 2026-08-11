@@ -68,6 +68,11 @@ class AdeSession(object):
             '%s does not run simulations through the database interface; '
             'use the simulation interface instead.' % type(self).__name__)
 
+    def create_netlist(self, lib, cell):
+        raise NotImplementedError(
+            '%s does not create standalone netlist decks; only the ADE-L '
+            'flavor implements create_netlist.' % type(self).__name__)
+
 
 class AdexlSession(AdeSession):
     """ADE-XL session flavor (``bag_adexl_session.il`` function family).
@@ -471,6 +476,64 @@ class AdelSession(AdexlSession):
                     'env_params': list(zip(sim_envs, env_parameters)),
                     }
         self._eval_skill(cmd, input_files=in_files)
+
+    #: seconds to wait for the netlist deck after adel_create_netlist.
+    netlist_timeout = 300.0
+    #: seconds between netlist deck polls.
+    netlist_poll_interval = 1.0
+    #: deck path template; ``testbench.netlist_path`` in the database
+    #: configuration overrides it.  The default matches both the ADE-L
+    #: project layout and bag.interface.spectre.SpectreInterface.
+    netlist_path_template = ('{work_dir}/simulation/{cell}/spectre/config/'
+                             'netlist/input.scs')
+
+    def netlist_path(self, lib, cell):
+        """Return the deck path the ADE-L netlist step writes."""
+        template = self.db_config['testbench'].get(
+            'netlist_path', self.netlist_path_template)
+        work_dir = os.environ.get('BAG_WORK_DIR', '.')
+        return template.format(work_dir=work_dir, lib=lib, cell=cell)
+
+    def create_netlist(self, lib, cell):
+        """(Re)create the ADE-L netlist deck without running the simulation.
+
+        Drives ``adel_create_netlist`` (``bag_adel_session.il``), which
+        opens the saved config-view/state session and recreates the deck the
+        direct simulator interfaces (:mod:`bag.interface.direct`) re-run
+        outside Virtuoso.  Completion is detected as a change of the deck
+        file against a pre-call ``(mtime, size)`` snapshot -- both stamps
+        come from the same file server, so comparing them sidesteps the
+        NFS-vs-local clock skew that rules out deadline-style mtime checks.
+
+        Returns
+        -------
+        deck : str
+            the netlist deck path.
+        """
+        deck = self.netlist_path(lib, cell)
+        try:
+            before = (os.path.getmtime(deck), os.path.getsize(deck))
+        except OSError:
+            before = None
+        self._eval_skill('adel_create_netlist("%s" "%s")' % (lib, cell))
+        elapsed = 0.0
+        while elapsed <= self.netlist_timeout:
+            try:
+                after = (os.path.getmtime(deck), os.path.getsize(deck))
+            except OSError:
+                after = None
+            if after is not None and after != before:
+                return deck
+            time.sleep(self.netlist_poll_interval)
+            elapsed += self.netlist_poll_interval
+        if before is not None:
+            raise Exception(
+                'adel_create_netlist left %s unchanged for %g s; the '
+                'netlister may have skipped an up-to-date deck (only the '
+                'incremental sevNetlist call is available on this ADE '
+                'build).' % (deck, self.netlist_timeout))
+        raise Exception('adel_create_netlist did not produce %s within %g s'
+                        % (deck, self.netlist_timeout))
 
     def run_simulation(self, lib, cell, res_file_name=None):
         """Run ADE-L simulation"""

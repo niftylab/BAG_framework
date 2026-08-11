@@ -432,6 +432,35 @@ class SkillInterface(DbAccess):
         return self._ade_session_for(lib, cell).run_simulation(
             lib, cell, res_file_name=res_file_name)
 
+    def create_netlist(self, lib, cell):
+        """(Re)create the simulation netlist deck for the given testbench.
+
+        Only session flavors that netlist a standalone deck through the
+        skill server (currently ADE-L) implement this; the deck is what the
+        direct simulator interfaces (:mod:`bag.interface.direct`) re-run
+        outside Virtuoso.
+
+        Returns
+        -------
+        deck : str
+            the netlist deck path.
+        """
+        return self._ade_session_for(lib, cell).create_netlist(lib, cell)
+
+    def get_library_path(self, lib):
+        """Return the on-disk path of an OA library, or None if unknown.
+
+        Parameters
+        ----------
+        lib : str
+            library name.
+        """
+        lib_path = self._eval_skill(
+            'ddGetObj("%s")~>readPath' % lib).strip().strip('"')
+        if not lib_path or lib_path == 'nil' or not os.path.isdir(lib_path):
+            return None
+        return lib_path
+
     def instantiate_layout_pcell(self, lib_name, cell_name, view_name,
                                  inst_lib, inst_cell, params, pin_mapping):
         """Create a layout cell with a single pcell instance.

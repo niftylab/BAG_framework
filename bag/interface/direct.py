@@ -14,7 +14,11 @@ The common contract (see :class:`DirectSimInterface`):
 * ``sim_config['netlist']`` names the source deck.  ``{work_dir}``,
   ``{lib}``, and ``{cell}`` are substituted, so the default for
   :class:`~bag.interface.spectre.SpectreInterface` points at the netlist
-  the last ADE-L run left in ``simulation/<cell>/spectre/config/netlist/``.
+  the ADE-L netlist step leaves in
+  ``simulation/<cell>/spectre/config/netlist/``.  ``ensure_netlist``
+  provisions that deck on demand through the database interface's
+  ``create_netlist`` (netlist-only ADE-L session, no simulation run), so a
+  prior ADE-L *run* is no longer required.
 * The deck is copied into a fresh save directory; entries of
   ``sim_config['params']`` override parameter values inside the copy.
 * ``setup_sim_process`` returns the standard ProcInfo tuple, so the
@@ -77,16 +81,88 @@ class DirectSimInterface(SimProcessManager):
                          'express sweeps in the deck itself.'
                          % type(self).__name__)
 
+    def netlist_path(self, lib, cell):
+        # type: (str, str) -> str
+        """Return the source deck path template resolved for a testbench."""
+        template = self.sim_config.get('netlist', self.default_netlist)
+        work_dir = os.environ.get('BAG_WORK_DIR', '.')
+        return template.format(work_dir=work_dir, lib=lib, cell=cell)
+
     def resolve_netlist(self, lib, cell):
         # type: (str, str) -> str
         """Return the source deck path for the given testbench."""
-        template = self.sim_config.get('netlist', self.default_netlist)
-        work_dir = os.environ.get('BAG_WORK_DIR', '.')
-        path = template.format(work_dir=work_dir, lib=lib, cell=cell)
+        path = self.netlist_path(lib, cell)
         if not os.path.isfile(path):
             raise ValueError('%s: netlist deck not found: %s'
                              % (type(self).__name__, path))
         return path
+
+    def ensure_netlist(self, db, lib, cell, refresh=None):
+        # type: (Any, str, str, Optional[str]) -> str
+        """Ensure the source deck exists, provisioning it through ``db``.
+
+        Parameters
+        ----------
+        db : bag.interface.database.DbAccess
+            database interface whose ``create_netlist`` provisions the deck
+            (the ADE-L skill interface).
+        lib : str
+            testbench library name.
+        cell : str
+            testbench cell name.
+        refresh : Optional[str]
+            deck refresh policy; defaults to
+            ``sim_config['netlist_refresh']`` (``'auto'`` if unset).
+
+            ``'never'``
+                only verify the deck exists.
+            ``'auto'``
+                recreate when the deck is missing or older than the
+                testbench cell's own OA views (schematic, config, saved
+                state).  DUT-side edits are *not* seen -- after
+                regenerating the DUT use ``'always'``.
+            ``'always'``
+                recreate unconditionally.
+
+        Returns
+        -------
+        deck : str
+            the netlist deck path.
+        """
+        if refresh is None:
+            refresh = self.sim_config.get('netlist_refresh', 'auto')
+        if refresh not in ('never', 'auto', 'always'):
+            raise ValueError('%s: unknown netlist_refresh policy: %s'
+                             % (type(self).__name__, refresh))
+        if refresh == 'never':
+            return self.resolve_netlist(lib, cell)
+
+        deck = self.netlist_path(lib, cell)
+        stale = refresh == 'always' or not os.path.isfile(deck)
+        if not stale:
+            # deck-vs-OA-source staleness: both stamps come from the same
+            # file server, so comparing them is NFS-safe.  Skipped when the
+            # database interface cannot resolve OA library paths.
+            get_lib_path = getattr(db, 'get_library_path', None)
+            lib_path = get_lib_path(lib) if get_lib_path is not None else None
+            if lib_path is not None:
+                cell_dir = os.path.join(lib_path, cell)
+                deck_mtime = os.path.getmtime(deck)
+                for dirpath, _dirnames, filenames in os.walk(cell_dir):
+                    for fname in filenames:
+                        try:
+                            src_mtime = os.path.getmtime(
+                                os.path.join(dirpath, fname))
+                        except OSError:
+                            continue
+                        if src_mtime > deck_mtime:
+                            stale = True
+                            break
+                    if stale:
+                        break
+        if stale:
+            return db.create_netlist(lib, cell)
+        return deck
 
     def patch_parameters(self, text, params):
         # type: (str, Dict[str, Any]) -> str

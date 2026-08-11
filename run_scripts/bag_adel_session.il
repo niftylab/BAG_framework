@@ -149,6 +149,36 @@ procedure( adel_modify_testbench(tb_lib tb_cell conf_file opt_file corner_file s
     ;)
 )
 
+; (ADE-L) create the simulation netlist deck without running the simulation.
+; Opens the same config-view ADE-L session adel_run_simulation uses, loads the
+; saved setup state, and (re)creates the netlist ADE would simulate
+; (<projectDir>/<cell>/spectre/config/netlist/).  The direct simulator
+; interfaces (bag/interface/direct.py family) re-run that deck outside
+; Virtuoso, so this is their netlist provisioning step.  The saved state is
+; left untouched.  Deck completion is verified by the python caller watching
+; the deck file against a pre-call snapshot; this procedure only reports
+; whether the netlist call itself failed.
+procedure( adel_create_netlist(tb_lib tb_cell @optional (tb_ade_view "spectre_state1"))
+    let( (session_name sev_sess_sess sev_session ok)
+        sprintf(session_name "bag_netlist_adel_%s" getCurrentTime())
+        sev_sess_sess = open_adel_session(tb_lib tb_cell "config" tb_ade_view session_name "a")
+        sev_session = car(sev_sess_sess)
+        ; prefer the full-recreate call so config-view or state edits made
+        ; since the last run are always picked up; fall back to the
+        ; incremental netlist call on ADE builds that lack it.
+        ok = if( isCallable('sevRecreateNetlist) then
+            errset(sevRecreateNetlist(sev_session) t)
+        else
+            errset(sevNetlist(sev_session) t)
+        );if
+        errset(sevQuit(sev_session) t)
+        unless( ok
+            error("adel_create_netlist failed for %s__%s: %L" tb_lib tb_cell errset.errset)
+        );unless
+        t
+    );let
+);procedure
+
 ; run an ade-l simulation.
 ; Polls the CIW log until the ADE-L run finishes.  A failed netlist/run or a
 ; poll timeout closes the ADE session and raises error() instead of polling
