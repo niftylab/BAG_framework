@@ -65,7 +65,8 @@ procedure( maestro_get_testbench_info(tb_lib tb_cell result_file "ttt")
 ; maestro views in a GUI session, where adexl_start_simulation's run-mode
 ; defaulting has been exercising it since 2026-08-11.
 procedure( maestro_modify_testbench(tb_lib tb_cell conf_file opt_file corner_file
-                                    param_file env_params_file "ttttttt")
+                                    param_file env_params_file
+                                    @optional (tb_view "maestro") (stim_file "") "ttttttt")
     modify_testbench(tb_lib tb_cell conf_file opt_file corner_file param_file
-                     env_params_file "maestro")
+                     env_params_file tb_view stim_file)
 )

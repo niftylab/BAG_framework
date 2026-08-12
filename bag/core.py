@@ -154,6 +154,9 @@ class Testbench(object):
         self.config_rules = {}
         self.outputs = outputs
         self.save_dir = None
+        # spectre lines injected through the ADE stimulus file; None means
+        # update_testbench() leaves the setup's stimulus file untouched.
+        self.stimuli = None
 
     def get_defined_simulation_environments(self):
         # type: () -> Sequence[str]
@@ -287,6 +290,92 @@ class Testbench(object):
         """
         self.sim_envs = env_list
 
+    def add_stimulus_line(self, line):
+        # type: (str) -> None
+        """Add a raw spectre line to the ADE stimulus file.
+
+        The lines collected here are written to a per-testbench stimulus
+        file and registered in the ADE setup (Setup -> Simulation Files)
+        by :meth:`update_testbench`.  The file is netlisted after the
+        schematic, so the lines can reference top-level testbench nets by
+        name.  Use this escape hatch for anything
+        :meth:`add_load`/:meth:`add_source` cannot express.
+
+        Parameters
+        ----------
+        line : str
+            a spectre-syntax netlist line.
+        """
+        if self.stimuli is None:
+            self.stimuli = []
+        self.stimuli.append(line)
+
+    def add_load(self, node, cap=None, res=None, node2='0', name=None):
+        # type: (str, Optional[float], Optional[float], str, Optional[str]) -> None
+        """Add a capacitive and/or resistive load between two testbench nets.
+
+        Parameters
+        ----------
+        node : str
+            the loaded net name.
+        cap : Optional[float]
+            capacitance to ground (or to node2), in farads.
+        res : Optional[float]
+            resistance to ground (or to node2), in ohms.
+        node2 : str
+            the other terminal; defaults to ground.
+        name : Optional[str]
+            instance name stem; auto-generated when None.
+        """
+        if cap is None and res is None:
+            raise ValueError('add_load needs cap and/or res.')
+        if name is None:
+            name = 'bag_load%d' % (0 if self.stimuli is None
+                                   else len(self.stimuli))
+        if cap is not None:
+            self.add_stimulus_line('%s_c (%s %s) capacitor c=%.6g'
+                                   % (name, node, node2, cap))
+        if res is not None:
+            self.add_stimulus_line('%s_r (%s %s) resistor r=%.6g'
+                                   % (name, node, node2, res))
+
+    def add_source(self, source_type, plus, minus='0', name=None, **params):
+        # type: (str, str, str, Optional[str], **Any) -> None
+        """Add a stimulus source between two testbench nets.
+
+        Examples
+        --------
+        >>> tb.add_source('vsource', 'VIN', type='dc', dc=0.5)   # doctest: +SKIP
+        >>> tb.add_source('isource', 'IBIAS', type='pulse', val0=0,
+        ...               val1='1m', period='2n')                # doctest: +SKIP
+
+        Parameters
+        ----------
+        source_type : str
+            the spectre primitive: 'vsource', 'isource', 'port', ...
+        plus : str
+            the positive terminal net.
+        minus : str
+            the negative terminal net; defaults to ground.
+        name : Optional[str]
+            instance name; auto-generated when None.
+        **params :
+            source parameters, emitted verbatim as key=value pairs.
+        """
+        if name is None:
+            name = 'bag_src%d' % (0 if self.stimuli is None
+                                  else len(self.stimuli))
+        args = ' '.join('%s=%s' % (key, val) for key, val in params.items())
+        line = '%s (%s %s) %s' % (name, plus, minus, source_type)
+        if args:
+            line += ' ' + args
+        self.add_stimulus_line(line)
+
+    def clear_stimuli(self):
+        # type: () -> None
+        """Empty the ADE stimulus file on the next update_testbench()."""
+        self.stimuli = []
+
     def set_simulation_view(self, lib_name, cell_name, sim_view):
         # type: (str, str, str) -> None
         """Set the simulation view of the given design.
@@ -323,7 +412,7 @@ class Testbench(object):
                 val_table = self.env_parameters[env]
                 env_params.append(list(val_table.items()))
         self.db.update_testbench(self.lib, self.cell, self.parameters, self.sim_envs, config_list,
-                                 env_params)
+                                 env_params, stimuli=self.stimuli)
 
     def run_simulation(self, precision=6, sim_tag=None):
         # type: (int, Optional[str]) -> Optional[str]

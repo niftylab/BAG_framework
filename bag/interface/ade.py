@@ -24,6 +24,22 @@ import bag
 from .skill import to_skill_list_str
 
 
+def stimuli_to_spec(stimuli):
+    """Encode a Testbench stimulus request as the SKILL-side spec list.
+
+    ``None`` (no request) maps to an empty list, which the SKILL side
+    treats as "leave the setup untouched"; an empty sequence maps to
+    ``['clear']`` (empty the testbench's stimulus file); a non-empty
+    sequence of spectre lines maps to ``['set', line, ...]``.
+    """
+    if stimuli is None:
+        return []
+    stimuli = list(stimuli)
+    if not stimuli:
+        return ['clear']
+    return ['set'] + stimuli
+
+
 class AdeSession(object):
     """Base class for one ADE flavor's testbench operations.
 
@@ -187,7 +203,8 @@ class AdexlSession(AdeSession):
                          parameters,  # type: Dict[str, str]
                          sim_envs,  # type: List[str]
                          config_rules,  # type: List[List[str]]
-                         env_parameters  # type: List[List[Tuple[str, str]]]
+                         env_parameters,  # type: List[List[Tuple[str, str]]]
+                         stimuli=None,  # type: Optional[List[str]]
                          ):
         # type: (...) -> None
         """Update the given testbench configuration.
@@ -206,15 +223,21 @@ class AdexlSession(AdeSession):
             config view mapping rules, list of (lib, cell, view) rules.
         env_parameters : List[List[Tuple[str, str]]]
             list of param/value list for each simulation environment.
+        stimuli : Optional[List[str]]
+            spectre lines to inject through the ADE stimulus file
+            (Setup -> Simulation Files).  None leaves the setup's
+            stimulus file untouched; an empty list empties it.
         """
 
         cmd = ('%s("%s" "%s" {conf_rules} {run_opts} '
-               '{sim_envs} {params} {env_params})' % (self.modify_fn, lib, cell))
+               '{sim_envs} {params} {env_params} "%s" {stimuli})'
+               % (self.modify_fn, lib, cell, self.tb_view))
         in_files = {'conf_rules': config_rules,
                     'run_opts': [],
                     'sim_envs': sim_envs,
                     'params': list(parameters.items()),
                     'env_params': list(zip(sim_envs, env_parameters)),
+                    'stimuli': stimuli_to_spec(stimuli),
                     }
         self._eval_skill(cmd, input_files=in_files)
 
@@ -361,15 +384,22 @@ class AdexlSession(AdeSession):
             # maestro histories also list saved signal traces (rows named
             # after nets, with no value); only output expressions carry
             # values ('wave' for waveform outputs).
-            rows = [row for row in rows if row[2] not in (None, '')]
-            if not rows:
+            valued = [row for row in rows if row[2] not in (None, '')]
+            if not valued:
+                # an output whose evaluation failed has errorID set and no
+                # value; a run where EVERY output failed leaves no valued
+                # rows at all, and returning None here would make the poll
+                # sit out the full timeout instead of failing fast (hit
+                # 2026-08-12, a too-large injected load broke every
+                # measurement).
+                failed = sorted({name for _p, name, _v, err in rows
+                                 if err is not None})
+                if failed:
+                    raise Exception('adexl run recorded evaluation errors '
+                                    'for outputs: %s (see %s)'
+                                    % (', '.join(failed), rdb_file))
                 return None
-            failed = sorted({name for _p, name, _v, err in rows
-                             if err is not None})
-            if failed:
-                raise Exception('adexl run recorded evaluation errors for '
-                                'outputs: %s (see %s)'
-                                % (', '.join(failed), rdb_file))
+            rows = valued
             points = sorted({p for p, _n, _v, _e in rows})
             if len(points) <= 1:
                 return {name: value for _p, name, value, _e in rows}
@@ -445,13 +475,17 @@ class AdelSession(AdexlSession):
         output = yaml.load(self._eval_skill(cmd, out_file='result_file'), Loader=yaml.FullLoader)
         return tb_config['default_env'], output['corners'], output['parameters'], output['outputs']
 
+    #: cellview holding the saved ADE-L setup state.
+    tb_ade_view = 'spectre_state1'
+
     def update_testbench(self,
                          lib,  # type: str
                          cell,  # type: str
                          parameters,  # type: Dict[str, str]
                          sim_envs,  # type: List[str]
                          config_rules,  # type: List[List[str]]
-                         env_parameters  # type: List[List[Tuple[str, str]]]
+                         env_parameters,  # type: List[List[Tuple[str, str]]]
+                         stimuli=None,  # type: Optional[List[str]]
                          ):
         # type: (...) -> None
         """Update the given testbench configuration.
@@ -470,17 +504,23 @@ class AdelSession(AdexlSession):
             config view mapping rules, list of (lib, cell, view) rules.
         env_parameters : List[List[Tuple[str, str]]]
             list of param/value list for each simulation environment.
+        stimuli : Optional[List[str]]
+            spectre lines to inject through the ADE stimulus file
+            (Setup -> Simulation Files).  None leaves the setup's
+            stimulus file untouched; an empty list empties it.
         """
 
         tb_config = self.db_config['testbench']
         corner_file = tb_config['env_file']
         cmd = ('adel_modify_testbench("%s" "%s" {conf_rules} {run_opts} "%s" '
-               '{sim_envs} {params} {env_params})' % (lib, cell, corner_file))
+               '{sim_envs} {params} {env_params} "%s" {stimuli})'
+               % (lib, cell, corner_file, self.tb_ade_view))
         in_files = {'conf_rules': config_rules,
                     'run_opts': [],
                     'sim_envs': sim_envs,
                     'params': list(parameters.items()),
                     'env_params': list(zip(sim_envs, env_parameters)),
+                    'stimuli': stimuli_to_spec(stimuli),
                     }
         self._eval_skill(cmd, input_files=in_files)
 

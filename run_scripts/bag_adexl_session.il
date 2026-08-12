@@ -47,6 +47,61 @@ procedure( set_adexl_parameters(sdb par_val_list "gl")
     )
 )
 
+; Writes BAG-injected stimulus/load lines to a per-testbench spectre file
+; and returns its absolute path.  The path is stable on purpose (not a temp
+; file): it ends up referenced from the saved ADE setup, and a vanished
+; temp file would leave the state pointing at nothing.
+procedure( bag_write_stimulus_file(tb_lib tb_cell stim_lines "ttl")
+    let( (dir path p)
+        sprintf(dir "%s/simulation" getWorkingDir())
+        unless( isDir(dir)
+            createDir(dir)
+        )
+        sprintf(dir "%s/bag_stimuli" dir)
+        unless( isDir(dir)
+            createDir(dir)
+        )
+        sprintf(path "%s/%s__%s.scs" dir tb_lib tb_cell)
+        unless( p = outfile(path "w")
+            error("bag_write_stimulus_file: cannot write %s" path)
+        )
+        fprintf(p "// BAG-injected stimuli/loads for %s__%s\n" tb_lib tb_cell)
+        fprintf(p "simulator lang=spectre\n")
+        foreach(line stim_lines
+            fprintf(p "%s\n" line)
+        )
+        close(p)
+        path
+    )
+)
+
+; Applies a BAG stimulus spec to an ADE session's Simulation Files setup.
+; stim_spec is nil (leave the setup untouched) or a list whose car is the
+; mode: ("set" line1 line2 ...) writes the lines to the testbench's
+; stimulus file and points 'stimulusFile at it; ("clear") empties that
+; file.  The option value must be a list of paths (ADE-5007 rejects a
+; bare string).
+;
+; "clear" rewrites the file instead of setting the option to nil: the
+; nil write succeeds in-session, but the incremental axl setup save does
+; not persist an option *removal* (verified on IC618, 2026-08-12), while
+; ADE-L's full state rewrite does.  Emptying the file is the same write
+; the "set" branch does, so it persists uniformly across flavors.
+procedure( bag_apply_stimuli(session tb_lib tb_cell stim_spec "gttg")
+    let( (lines)
+        when( stim_spec
+            lines = cond(
+                ( car(stim_spec) == "clear" nil )
+                ( car(stim_spec) == "set" cdr(stim_spec) )
+                ( t error("bag_apply_stimuli: unknown stimulus mode %L"
+                          car(stim_spec)) )
+            )
+            asiSetEnvOptionVal(session 'stimulusFile
+                list(bag_write_stimulus_file(tb_lib tb_cell lines)))
+        )
+    )
+)
+
 ; Write testbench information to file.
 procedure( write_testbench_info_to_file(sdb result_file output_list en_corner_list)
     let( (p output_count)
@@ -260,8 +315,11 @@ procedure( set_run_options(session sdb run_params "ggl")
 ; corner_file contains a list of corners to simulate.
 ; param_file contains the association list of parameter values.
 ; tb_view selects the assembler cellview: "adexl" (default) or "maestro".
-procedure( modify_testbench(tb_lib tb_cell conf_file opt_file corner_file param_file env_params_file @optional (tb_view "adexl"))
-    let( (tmp_list session sdb conf_list run_params corner_list param_values env_param_values session_name)
+; stim_file, when non-empty, contains a BAG stimulus spec (see
+; bag_apply_stimuli) applied to the view's single test.
+procedure( modify_testbench(tb_lib tb_cell conf_file opt_file corner_file param_file env_params_file @optional (tb_view "adexl") (stim_file ""))
+    let( (tmp_list session sdb conf_list run_params corner_list param_values env_param_values
+          session_name stim_spec test_names)
         sprintf(session_name "bag_sim_adexl_%s" getCurrentTime())
 
         ; read inputs from file.
@@ -270,6 +328,7 @@ procedure( modify_testbench(tb_lib tb_cell conf_file opt_file corner_file param_
         corner_list = parse_data_from_file(corner_file)
         param_values = parse_data_from_file(param_file)
         env_param_values = parse_data_from_file(env_params_file)
+        stim_spec = if( nequal(stim_file "") parse_data_from_file(stim_file) nil )
 
         ; modify config view
         when( conf_list
@@ -284,6 +343,21 @@ procedure( modify_testbench(tb_lib tb_cell conf_file opt_file corner_file param_
         enable_adexl_corners( sdb corner_list env_param_values)
         set_adexl_parameters( sdb param_values )
         set_run_options( session sdb run_params )
+
+        ; apply BAG stimuli to the test's ADE session (cf. the definition-file
+        ; write in instantiate_testbench, which uses the same tool-session path).
+        ; axlSaveSetup (the GUI save) pushes the tool-session change into the
+        ; ACTIVE test state; on maestro views the state saves below only
+        ; capture it in the named side states, and the run netlists from the
+        ; active state (verified on IC618, 2026-08-12 -- adexl views happen to
+        ; sync the active state through axlMainAppSaveSetup, maestro views do
+        ; not).
+        when( stim_spec
+            test_names = cadr(axlGetTests(sdb))
+            bag_apply_stimuli(asiGetSession(axlGetToolSession(session_name car(test_names)))
+                              tb_lib tb_cell stim_spec)
+            axlSaveSetup(session_name)
+        )
 
         ; save and close
         axlSaveSetupState(session "adexl_default" "All")

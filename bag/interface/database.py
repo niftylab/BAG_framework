@@ -246,6 +246,7 @@ class DbAccess(InterfaceBase, abc.ABC):
                          sim_envs,  # type: Sequence[str]
                          config_rules,  # type: Sequence[List[str]]
                          env_parameters,  # type: Sequence[List[Tuple[str, str]]]
+                         stimuli=None,  # type: Optional[Sequence[str]]
                          ):
         # type: (...) -> None
         """Update the given testbench configuration.
@@ -264,6 +265,10 @@ class DbAccess(InterfaceBase, abc.ABC):
             config view mapping rules, list of (lib, cell, view) rules.
         env_parameters : Sequence[List[Tuple[str, str]]]
             list of param/value list for each simulation environment.
+        stimuli : Optional[Sequence[str]]
+            spectre lines to inject through the ADE stimulus file.  None
+            leaves the setup's stimulus file untouched; an empty sequence
+            empties it.
         """
         pass
 

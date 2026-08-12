@@ -111,8 +111,10 @@ procedure( adel_instantiate_testbench(tb_cell targ_lib
 ; opt_file contains the association list of run mode options.
 ; corner_file contains a list of corners to simulate.
 ; param_file contains the association list of parameter values.
-procedure( adel_modify_testbench(tb_lib tb_cell conf_file opt_file corner_file sim_env_file param_file 
-                                 env_params_file @optional (tb_ade_view "spectre_state1") "ttttttt")
+; stim_file, when non-empty, contains a BAG stimulus spec (see
+; bag_apply_stimuli in bag_adexl_session.il).
+procedure( adel_modify_testbench(tb_lib tb_cell conf_file opt_file corner_file sim_env_file param_file
+                                 env_params_file @optional (tb_ade_view "spectre_state1") (stim_file "") "ttttttt")
     ;let( (sev_sess_sess sev_session session sdb conf_list run_params corner_list env_param_values session_name)
         sprintf(session_name "bag_sim_adel_%s" getCurrentTime())
 
@@ -123,6 +125,7 @@ procedure( adel_modify_testbench(tb_lib tb_cell conf_file opt_file corner_file s
         corner_list = parse_data_from_file(sim_env_file)
         param_values = parse_data_from_file(param_file)
         env_param_values = parse_data_from_file(env_params_file)
+        stim_spec = if( nequal(stim_file "") parse_data_from_file(stim_file) nil )
 
         ; modify config view
         when( conf_list
@@ -138,6 +141,9 @@ procedure( adel_modify_testbench(tb_lib tb_cell conf_file opt_file corner_file s
         asiAddModelLibSelection(session corner_file car(corner_list))
 
         set_adel_parameters( session param_values )
+
+        ; apply BAG stimuli (before the state save below, so it persists)
+        bag_apply_stimuli(session tb_lib tb_cell stim_spec)
 
         ; delete original ade view to update
         state_obj = ddGetObj(tb_lib tb_cell tb_ade_view)

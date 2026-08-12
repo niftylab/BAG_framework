@@ -398,7 +398,8 @@ class SkillInterface(DbAccess):
                          parameters,  # type: Dict[str, str]
                          sim_envs,  # type: List[str]
                          config_rules,  # type: List[List[str]]
-                         env_parameters  # type: List[List[Tuple[str, str]]]
+                         env_parameters,  # type: List[List[Tuple[str, str]]]
+                         stimuli=None,  # type: Optional[List[str]]
                          ):
         # type: (...) -> None
         """Update the given testbench configuration.
@@ -417,9 +418,14 @@ class SkillInterface(DbAccess):
             config view mapping rules, list of (lib, cell, view) rules.
         env_parameters : List[List[Tuple[str, str]]]
             list of param/value list for each simulation environment.
+        stimuli : Optional[List[str]]
+            spectre lines to inject through the ADE stimulus file
+            (Setup -> Simulation Files).  None leaves the setup's
+            stimulus file untouched; an empty list empties it.
         """
         self._ade_session_for(lib, cell).update_testbench(
-            lib, cell, parameters, sim_envs, config_rules, env_parameters)
+            lib, cell, parameters, sim_envs, config_rules, env_parameters,
+            stimuli=stimuli)
 
     def run_simulation(self, lib, cell, res_file_name=None):
         """Run a simulation through the ADE session.

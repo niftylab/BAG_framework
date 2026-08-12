@@ -55,7 +55,7 @@ class NetlistInterface(DbAccess, metaclass=abc.ABCMeta):
         )
 
     def update_testbench(self, lib, cell, parameters, sim_envs,
-                         config_rules, env_parameters):
+                         config_rules, env_parameters, stimuli=None):
         raise NotImplementedError(
             'A local netlist database does not implement ADE testbenches.'
         )
