@@ -16,9 +16,15 @@ The common contract (see :class:`DirectSimInterface`):
   :class:`~bag.interface.spectre.SpectreInterface` points at the netlist
   the ADE-L netlist step leaves in
   ``simulation/<cell>/spectre/config/netlist/``.  ``ensure_netlist``
-  provisions that deck on demand through the database interface's
-  ``create_netlist`` (netlist-only ADE-L session, no simulation run), so a
-  prior ADE-L *run* is no longer required.
+  provisions that deck on demand: ``sim_config['netlist_source']`` picks
+  between a netlist-only ADE-L session through the database interface's
+  ``create_netlist`` (``'ade'``, the default) and the standalone ``si``
+  netlister (``'si'``), which regenerates the circuit body without any
+  ADE session and splices it back into the assembled deck (see
+  :meth:`DirectSimInterface.create_netlist_with_si`).  Either way a prior
+  ADE-L *run* is not required, but the ``si`` path still needs one ADE-L
+  netlist step ever to have produced the deck (its control section --
+  analyses, model includes, design variables -- comes from ADE).
 * The deck is copied into a fresh save directory; entries of
   ``sim_config['params']`` override parameter values inside the copy.
 * ``setup_sim_process`` returns the standard ProcInfo tuple, so the
@@ -34,9 +40,30 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import os
 import re
+import subprocess
 
 import bag.io
 from .simulator import SimProcessManager
+
+
+class SiNetlistPrereqError(ValueError):
+    """The si netlist path is missing one of its splice inputs.
+
+    Raised before ``si`` is even invoked: the deck, the ``netlist`` body
+    file, or ``si.env`` does not exist (or the deck no longer embeds the
+    body verbatim).  ``ensure_netlist`` treats this as "provision through
+    ADE-L instead" when a database interface is available, because these
+    inputs only exist after one ADE-L netlist step.
+    """
+
+
+class SiNetlistError(Exception):
+    """The ``si`` netlist run itself failed (bad exit code, timeout).
+
+    Unlike :class:`SiNetlistPrereqError` this is *not* recoverable by
+    falling back to ADE-L -- the OA design most likely does not netlist,
+    and ADE would only fail the same way later.
+    """
 
 
 class DirectSimInterface(SimProcessManager):
@@ -58,6 +85,16 @@ class DirectSimInterface(SimProcessManager):
             optional {name: value} overrides patched into the deck copy.
         ``env`` / ``cwd``
             optional subprocess environment / working directory.
+        ``netlist_source``
+            how ``ensure_netlist`` refreshes a stale deck: ``'ade'``
+            (default; netlist-only ADE-L session through the database
+            interface) or ``'si'`` (standalone ``si`` netlister, see
+            :meth:`create_netlist_with_si`).
+        ``si_command`` / ``si_args`` / ``si_timeout`` / ``si_cwd``
+            ``si`` invocation overrides: the executable (string or argv
+            prefix list), extra trailing arguments, run timeout in
+            seconds, and the working directory ``si`` resolves ``cds.lib``
+            from (defaults to ``$BAG_WORK_DIR``).
     """
 
     #: subclass default simulator executable.
@@ -66,6 +103,14 @@ class DirectSimInterface(SimProcessManager):
     default_netlist = ''
     #: name of the deck copy inside the save directory.
     deck_name = 'input.ckt'
+    #: default ``si`` executable of the si netlist path.
+    default_si_command = 'si'
+    #: seconds to wait for the ``si`` netlist run.
+    si_timeout = 300.0
+    #: name of the circuit body file the netlister writes next to the deck.
+    netlist_body_name = 'netlist'
+    #: name of the netlister configuration file next to the deck.
+    si_env_name = 'si.env'
 
     def __init__(self, tmp_dir, sim_config):
         # type: (str, Dict[str, Any]) -> None
@@ -99,13 +144,16 @@ class DirectSimInterface(SimProcessManager):
 
     def ensure_netlist(self, db, lib, cell, refresh=None):
         # type: (Any, str, str, Optional[str]) -> str
-        """Ensure the source deck exists, provisioning it through ``db``.
+        """Ensure the source deck exists, refreshing it when stale.
 
         Parameters
         ----------
-        db : bag.interface.database.DbAccess
+        db : bag.interface.database.DbAccess or None
             database interface whose ``create_netlist`` provisions the deck
-            (the ADE-L skill interface).
+            (the ADE-L skill interface).  With
+            ``sim_config['netlist_source'] == 'si'`` it is only used as the
+            first-provisioning fallback and may be None once the deck
+            exists.
         lib : str
             testbench library name.
         cell : str
@@ -117,12 +165,15 @@ class DirectSimInterface(SimProcessManager):
             ``'never'``
                 only verify the deck exists.
             ``'auto'``
-                recreate when the deck is missing or older than the
-                testbench cell's own OA views (schematic, config, saved
-                state).  DUT-side edits are *not* seen -- after
-                regenerating the DUT use ``'always'``.
+                recreate when the deck is stale.  The ADE source compares
+                the deck against the testbench cell's own OA views, so
+                DUT-side edits are *not* seen -- use ``'always'`` after
+                regenerating the DUT.  The si source instead lets the
+                netlister's own incremental check walk the whole design
+                hierarchy, so DUT edits *are* picked up.
             ``'always'``
-                recreate unconditionally.
+                recreate unconditionally (the si source forces a full
+                renetlist via ``simNotIncremental``).
 
         Returns
         -------
@@ -134,8 +185,25 @@ class DirectSimInterface(SimProcessManager):
         if refresh not in ('never', 'auto', 'always'):
             raise ValueError('%s: unknown netlist_refresh policy: %s'
                              % (type(self).__name__, refresh))
+        source = self.sim_config.get('netlist_source', 'ade')
+        if source not in ('ade', 'si'):
+            raise ValueError('%s: unknown netlist_source: %s'
+                             % (type(self).__name__, source))
         if refresh == 'never':
             return self.resolve_netlist(lib, cell)
+
+        if source == 'si':
+            try:
+                return self.create_netlist_with_si(
+                    lib, cell, force=(refresh == 'always'))
+            except SiNetlistPrereqError:
+                # the splice inputs only exist after one ADE-L netlist
+                # step; provision through ADE-L when we can, else let the
+                # prerequisite error explain what is missing.
+                create = getattr(db, 'create_netlist', None)
+                if create is None:
+                    raise
+                return create(lib, cell)
 
         deck = self.netlist_path(lib, cell)
         stale = refresh == 'always' or not os.path.isfile(deck)
@@ -163,6 +231,114 @@ class DirectSimInterface(SimProcessManager):
         if stale:
             return db.create_netlist(lib, cell)
         return deck
+
+    def create_netlist_with_si(self, lib, cell, force=False):
+        # type: (str, str, bool) -> str
+        """Refresh the deck's circuit body with the standalone ``si`` netlister.
+
+        ADE assembles the deck (``input.scs``) by concatenating the
+        netlister's circuit output (the ``netlist`` file next to it) with
+        an ADE-owned control section (design variables, model includes,
+        analyses).  Only the circuit body goes stale when the design is
+        regenerated, and the netlister that produces it is the same OSS
+        netlister ``si -batch -command netlist`` drives from the ``si.env``
+        ADE leaves in the netlist directory.  So: rerun ``si`` on that
+        directory, then splice the regenerated body back into the deck in
+        place of the old one.  No ADE session, no skill server -- but the
+        deck, body, and ``si.env`` must exist from one prior ADE-L netlist
+        step (:class:`SiNetlistPrereqError` otherwise).
+
+        Parameters
+        ----------
+        lib : str
+            testbench library name (only used for error messages; the
+            netlist directory identifies the design).
+        cell : str
+            testbench cell name.
+        force : bool
+            True to force a full renetlist (``simNotIncremental``) instead
+            of the netlister's incremental timestamp check.
+
+        Returns
+        -------
+        deck : str
+            the netlist deck path.
+        """
+        deck = self.netlist_path(lib, cell)
+        nl_dir = os.path.dirname(deck)
+        body_path = os.path.join(nl_dir, self.netlist_body_name)
+        env_path = os.path.join(nl_dir, self.si_env_name)
+        for path, desc in ((deck, 'netlist deck'),
+                           (body_path, 'circuit body file'),
+                           (env_path, 'si.env')):
+            if not os.path.isfile(path):
+                raise SiNetlistPrereqError(
+                    '%s: %s not found: %s (the si netlist path needs one '
+                    'prior ADE-L netlist step for %s__%s).'
+                    % (type(self).__name__, desc, path, lib, cell))
+        deck_text = bag.io.read_file(deck)
+        old_body = bag.io.read_file(body_path)
+        if not old_body.strip() or old_body not in deck_text:
+            raise SiNetlistPrereqError(
+                '%s: %s is not embedded verbatim in %s; the deck was '
+                'hand-edited or assembled differently, so the si splice '
+                'cannot locate the circuit section.'
+                % (type(self).__name__, body_path, deck))
+        self._run_si(nl_dir, force=force)
+        new_body = bag.io.read_file(body_path)
+        if new_body != old_body:
+            bag.io.write_file(deck, deck_text.replace(old_body, new_body, 1))
+        return deck
+
+    def _run_si(self, nl_dir, force=False):
+        # type: (str, bool) -> None
+        """Run ``si -batch -command netlist`` on the netlist directory.
+
+        ``si`` reads ``si.env`` from the run directory and resolves
+        ``cds.lib`` from its working directory, so the subprocess runs in
+        ``sim_config['si_cwd']`` (default ``$BAG_WORK_DIR``, the workspace
+        root).  With ``force`` the run directory's ``si.env`` temporarily
+        gets ``simNotIncremental = 't`` (restored afterwards) -- there is
+        no command-line equivalent.
+        """
+        env_path = os.path.join(nl_dir, self.si_env_name)
+        original = None
+        if force:
+            original = bag.io.read_file(env_path)
+            patched, n_sub = re.subn(r'(?m)^\s*simNotIncremental\s*=.*$',
+                                     "simNotIncremental = 't", original)
+            if n_sub == 0:
+                patched = patched.rstrip('\n') + "\nsimNotIncremental = 't\n"
+            bag.io.write_file(env_path, patched)
+        try:
+            cmd_cfg = self.sim_config.get('si_command', self.default_si_command)
+            if isinstance(cmd_cfg, (list, tuple)):
+                cmd = list(cmd_cfg)
+            else:
+                cmd = [cmd_cfg]
+            cmd += [nl_dir, '-batch', '-command', 'netlist']
+            cmd += list(self.sim_config.get('si_args', ()))
+            cwd = (self.sim_config.get('si_cwd')
+                   or os.environ.get('BAG_WORK_DIR', '.'))
+            timeout = float(self.sim_config.get('si_timeout', self.si_timeout))
+            try:
+                proc = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE,
+                                      stderr=subprocess.STDOUT, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                raise SiNetlistError(
+                    '%s: si netlist run timed out after %g s in %s '
+                    '(command: %s)'
+                    % (type(self).__name__, timeout, nl_dir, ' '.join(cmd)))
+            output = proc.stdout.decode('utf-8', errors='replace')
+            if proc.returncode != 0 or '*Error*' in output:
+                tail = '\n'.join(output.splitlines()[-20:])
+                raise SiNetlistError(
+                    '%s: si netlist run failed (exit %d) in %s; last '
+                    'output:\n%s\n(see si.log in the run directory)'
+                    % (type(self).__name__, proc.returncode, nl_dir, tail))
+        finally:
+            if original is not None:
+                bag.io.write_file(env_path, original)
 
     def patch_parameters(self, text, params):
         # type: (str, Dict[str, Any]) -> str
