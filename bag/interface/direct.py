@@ -88,13 +88,26 @@ class DirectSimInterface(SimProcessManager):
         ``netlist_source``
             how ``ensure_netlist`` refreshes a stale deck: ``'ade'``
             (default; netlist-only ADE-L session through the database
-            interface) or ``'si'`` (standalone ``si`` netlister, see
-            :meth:`create_netlist_with_si`).
+            interface), ``'si'`` (standalone ``si`` batch netlister), or
+            ``'ocean'`` (headless ``ocean -nograph`` ``createNetlist()``
+            session).  The si and ocean sources share the body-splice
+            machinery of :meth:`create_netlist_with_si`.  Note ``si``
+            proved unusable on installs whose ``Virtuoso_Spectre``
+            license feature is expired (the encrypted OSS hnl driver
+            exits silently); ``ocean`` runs the same OSS netlister under
+            an available ADE/MMSIM license and is the verified choice
+            there.
         ``si_command`` / ``si_args`` / ``si_timeout`` / ``si_cwd``
-            ``si`` invocation overrides: the executable (string or argv
-            prefix list), extra trailing arguments, run timeout in
-            seconds, and the working directory ``si`` resolves ``cds.lib``
-            from (defaults to ``$BAG_WORK_DIR``).
+            standalone-netlister invocation overrides: the ``si``
+            executable (string or argv prefix list), extra trailing
+            arguments, run timeout in seconds, and the working directory
+            the netlister resolves ``cds.lib`` from (defaults to
+            ``$BAG_WORK_DIR``).  ``si_timeout``/``si_cwd`` also apply to
+            the ocean source.
+        ``ocean_command`` / ``ocean_args``
+            ocean-source overrides: the ``ocean`` executable (string or
+            argv prefix list) and extra arguments inserted before
+            ``-replay``.
     """
 
     #: subclass default simulator executable.
@@ -105,7 +118,9 @@ class DirectSimInterface(SimProcessManager):
     deck_name = 'input.ckt'
     #: default ``si`` executable of the si netlist path.
     default_si_command = 'si'
-    #: seconds to wait for the ``si`` netlist run.
+    #: default ``ocean`` executable of the ocean netlist path.
+    default_ocean_command = 'ocean'
+    #: seconds to wait for a standalone netlist run (si or ocean).
     si_timeout = 300.0
     #: name of the circuit body file the netlister writes next to the deck.
     netlist_body_name = 'netlist'
@@ -186,16 +201,16 @@ class DirectSimInterface(SimProcessManager):
             raise ValueError('%s: unknown netlist_refresh policy: %s'
                              % (type(self).__name__, refresh))
         source = self.sim_config.get('netlist_source', 'ade')
-        if source not in ('ade', 'si'):
+        if source not in ('ade', 'si', 'ocean'):
             raise ValueError('%s: unknown netlist_source: %s'
                              % (type(self).__name__, source))
         if refresh == 'never':
             return self.resolve_netlist(lib, cell)
 
-        if source == 'si':
+        if source in ('si', 'ocean'):
             try:
                 return self.create_netlist_with_si(
-                    lib, cell, force=(refresh == 'always'))
+                    lib, cell, force=(refresh == 'always'), runner=source)
             except SiNetlistPrereqError:
                 # the splice inputs only exist after one ADE-L netlist
                 # step; provision through ADE-L when we can, else let the
@@ -232,59 +247,83 @@ class DirectSimInterface(SimProcessManager):
             return db.create_netlist(lib, cell)
         return deck
 
-    def create_netlist_with_si(self, lib, cell, force=False):
-        # type: (str, str, bool) -> str
-        """Refresh the deck's circuit body with the standalone ``si`` netlister.
+    def create_netlist_with_si(self, lib, cell, force=False, runner='si'):
+        # type: (str, str, bool, str) -> str
+        """Refresh the deck's circuit body with a standalone netlist run.
 
         ADE assembles the deck (``input.scs``) by concatenating the
         netlister's circuit output (the ``netlist`` file next to it) with
         an ADE-owned control section (design variables, model includes,
         analyses).  Only the circuit body goes stale when the design is
-        regenerated, and the netlister that produces it is the same OSS
-        netlister ``si -batch -command netlist`` drives from the ``si.env``
-        ADE leaves in the netlist directory.  So: rerun ``si`` on that
-        directory, then splice the regenerated body back into the deck in
-        place of the old one.  No ADE session, no skill server -- but the
-        deck, body, and ``si.env`` must exist from one prior ADE-L netlist
-        step (:class:`SiNetlistPrereqError` otherwise).
+        regenerated, and it can be rebuilt without an ADE session: rerun
+        the OSS netlister on the netlist directory, then splice the
+        regenerated body back into the deck in place of the old one.  Two
+        runners drive the netlister:
+
+        ``'si'``
+            ``si -batch -command netlist`` on the ``si.env`` ADE leaves in
+            the netlist directory.
+        ``'ocean'``
+            a generated ``ocean -nograph`` script whose ``createNetlist()``
+            regenerates the same directory (needs no ``si.env``; the
+            design identity comes from the netlist path and the ocean
+            session holds an ADE/MMSIM license instead of the
+            ``Virtuoso_Spectre`` feature ``si`` insists on).
+
+        No skill server either way -- but the deck and body must exist
+        from one prior ADE-L netlist step (:class:`SiNetlistPrereqError`
+        otherwise).  The regenerated body may name subcircuits differently
+        from the ADE run (OSS uniquification depends on the session); the
+        deck stays self-consistent because instance lines and subckt
+        definitions are both inside the body.
 
         Parameters
         ----------
         lib : str
-            testbench library name (only used for error messages; the
-            netlist directory identifies the design).
+            testbench library name (the ocean runner netlists this
+            library; the si runner takes it from ``si.env``).
         cell : str
             testbench cell name.
         force : bool
-            True to force a full renetlist (``simNotIncremental``) instead
-            of the netlister's incremental timestamp check.
+            True to force a full renetlist (``simNotIncremental`` /
+            ``?recreateAll t``) instead of the netlister's incremental
+            timestamp check.
+        runner : str
+            ``'si'`` or ``'ocean'``.
 
         Returns
         -------
         deck : str
             the netlist deck path.
         """
+        if runner not in ('si', 'ocean'):
+            raise ValueError('%s: unknown standalone netlist runner: %s'
+                             % (type(self).__name__, runner))
         deck = self.netlist_path(lib, cell)
         nl_dir = os.path.dirname(deck)
         body_path = os.path.join(nl_dir, self.netlist_body_name)
         env_path = os.path.join(nl_dir, self.si_env_name)
-        for path, desc in ((deck, 'netlist deck'),
-                           (body_path, 'circuit body file'),
-                           (env_path, 'si.env')):
+        required = [(deck, 'netlist deck'), (body_path, 'circuit body file')]
+        if runner == 'si':
+            required.append((env_path, 'si.env'))
+        for path, desc in required:
             if not os.path.isfile(path):
                 raise SiNetlistPrereqError(
-                    '%s: %s not found: %s (the si netlist path needs one '
-                    'prior ADE-L netlist step for %s__%s).'
+                    '%s: %s not found: %s (the standalone netlist path '
+                    'needs one prior ADE-L netlist step for %s__%s).'
                     % (type(self).__name__, desc, path, lib, cell))
         deck_text = bag.io.read_file(deck)
         old_body = bag.io.read_file(body_path)
         if not old_body.strip() or old_body not in deck_text:
             raise SiNetlistPrereqError(
                 '%s: %s is not embedded verbatim in %s; the deck was '
-                'hand-edited or assembled differently, so the si splice '
+                'hand-edited or assembled differently, so the splice '
                 'cannot locate the circuit section.'
                 % (type(self).__name__, body_path, deck))
-        self._run_si(nl_dir, force=force)
+        if runner == 'si':
+            self._run_si(nl_dir, force=force)
+        else:
+            self._run_ocean(nl_dir, lib, cell, force=force)
         new_body = bag.io.read_file(body_path)
         if new_body != old_body:
             bag.io.write_file(deck, deck_text.replace(old_body, new_body, 1))
@@ -318,27 +357,78 @@ class DirectSimInterface(SimProcessManager):
                 cmd = [cmd_cfg]
             cmd += [nl_dir, '-batch', '-command', 'netlist']
             cmd += list(self.sim_config.get('si_args', ()))
-            cwd = (self.sim_config.get('si_cwd')
-                   or os.environ.get('BAG_WORK_DIR', '.'))
-            timeout = float(self.sim_config.get('si_timeout', self.si_timeout))
-            try:
-                proc = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE,
-                                      stderr=subprocess.STDOUT, timeout=timeout)
-            except subprocess.TimeoutExpired:
-                raise SiNetlistError(
-                    '%s: si netlist run timed out after %g s in %s '
-                    '(command: %s)'
-                    % (type(self).__name__, timeout, nl_dir, ' '.join(cmd)))
-            output = proc.stdout.decode('utf-8', errors='replace')
-            if proc.returncode != 0 or '*Error*' in output:
-                tail = '\n'.join(output.splitlines()[-20:])
-                raise SiNetlistError(
-                    '%s: si netlist run failed (exit %d) in %s; last '
-                    'output:\n%s\n(see si.log in the run directory)'
-                    % (type(self).__name__, proc.returncode, nl_dir, tail))
+            self._run_netlister_cmd(cmd, nl_dir, 'si')
         finally:
             if original is not None:
                 bag.io.write_file(env_path, original)
+
+    def _run_ocean(self, nl_dir, lib, cell, force=False):
+        # type: (str, str, str, bool) -> None
+        """Regenerate the netlist directory through ``ocean -nograph``.
+
+        Writes a throwaway ocean script whose ``createNetlist()`` targets
+        the same project layout the deck lives in
+        (``<project>/<cell>/<simulator>/<view>/netlist``); simulator, view,
+        and project directory are recovered from the netlist path.  The
+        subprocess runs in ``sim_config['si_cwd']`` (default
+        ``$BAG_WORK_DIR``) so cds.lib and the workspace ``.cdsenv``
+        resolve as usual.
+        """
+        view_dir, _nl = os.path.split(os.path.abspath(nl_dir))
+        sim_dir, view_name = os.path.split(view_dir)
+        cell_dir, sim_name = os.path.split(sim_dir)
+        proj_dir, path_cell = os.path.split(cell_dir)
+        if path_cell != cell:
+            raise SiNetlistPrereqError(
+                '%s: netlist path %s does not follow the '
+                '<project>/<cell>/<simulator>/<view>/netlist layout for '
+                'cell %s; the ocean runner cannot recover the project '
+                'directory.' % (type(self).__name__, nl_dir, cell))
+        script = (
+            'envSetVal("asimenv.startup" "projectDir" \'string "%s")\n'
+            'simulator(\'%s)\n'
+            'design("%s" "%s" "%s")\n'
+            'ok = createNetlist(?recreateAll %s ?display nil)\n'
+            'unless(ok exit(1))\n'
+            'exit\n'
+            % (proj_dir, sim_name, lib, cell, view_name,
+               't' if force else 'nil'))
+        script_dir = bag.io.make_temp_dir(prefix='ocean_netlist',
+                                          parent_dir=self.tmp_dir)
+        script_path = os.path.join(script_dir, 'netlist.ocn')
+        bag.io.write_file(script_path, script)
+        cmd_cfg = self.sim_config.get('ocean_command',
+                                      self.default_ocean_command)
+        if isinstance(cmd_cfg, (list, tuple)):
+            cmd = list(cmd_cfg)
+        else:
+            cmd = [cmd_cfg]
+        cmd += ['-nograph', '-log', os.path.join(script_dir, 'ocean.log')]
+        cmd += list(self.sim_config.get('ocean_args', ()))
+        cmd += ['-replay', script_path]
+        self._run_netlister_cmd(cmd, nl_dir, 'ocean')
+
+    def _run_netlister_cmd(self, cmd, nl_dir, what):
+        # type: (List[str], str, str) -> None
+        """Run a standalone netlister command and raise on failure."""
+        cwd = (self.sim_config.get('si_cwd')
+               or os.environ.get('BAG_WORK_DIR', '.'))
+        timeout = float(self.sim_config.get('si_timeout', self.si_timeout))
+        try:
+            proc = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise SiNetlistError(
+                '%s: %s netlist run timed out after %g s for %s '
+                '(command: %s)'
+                % (type(self).__name__, what, timeout, nl_dir, ' '.join(cmd)))
+        output = proc.stdout.decode('utf-8', errors='replace')
+        if proc.returncode != 0 or '*Error*' in output:
+            tail = '\n'.join(output.splitlines()[-20:])
+            raise SiNetlistError(
+                '%s: %s netlist run failed (exit %d) for %s; last '
+                'output:\n%s'
+                % (type(self).__name__, what, proc.returncode, nl_dir, tail))
 
     def patch_parameters(self, text, params):
         # type: (str, Dict[str, Any]) -> str

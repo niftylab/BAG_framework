@@ -8,10 +8,13 @@ without Virtuoso or ADE.  The deck is provisioned on demand with
 ``ensure_netlist(db, lib, cell)`` when it is missing or stale -- no prior
 ADE-L simulation run is required.  ``netlist_source`` picks the refresh
 mechanism: ``ade`` drives a netlist-only ADE-L session through the skill
-database interface, ``si`` reruns the standalone ``si`` netlister on the
-deck's netlist directory and splices the regenerated circuit body into the
-deck (no ADE session or skill server; needs one prior ADE-L netlist step to
-have assembled the deck).  Design-variable overrides come from
+database interface; ``si`` and ``ocean`` rerun the standalone netlister
+(``si -batch`` on ADE's ``si.env``, or a headless ``ocean -nograph``
+``createNetlist()`` session) and splice the regenerated circuit body into
+the deck (no ADE session or skill server; needs one prior ADE-L netlist
+step to have assembled the deck).  Prefer ``ocean`` where the
+``Virtuoso_Spectre`` license feature is expired -- batch ``si`` dies
+silently there.  Design-variable overrides come from
 ``sim_config['params']`` and are patched into the ``parameters`` statement
 of the deck copy.  Results are written as psfascii under ``<save_dir>/psf``
 and parsed with :func:`bag.interface.direct.parse_psfascii_traces`.
@@ -23,7 +26,7 @@ Example configuration::
       kwargs: {}
       netlist: "{work_dir}/simulation/{cell}/spectre/config/netlist/input.scs"
       netlist_refresh: auto   # never | auto | always (see ensure_netlist)
-      netlist_source: si      # ade | si (see ensure_netlist)
+      netlist_source: ocean   # ade | si | ocean (see ensure_netlist)
       params: {pper: 1.0e-10}
 
 The ``netlist`` template above is also the default deck location of the

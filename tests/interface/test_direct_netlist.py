@@ -60,6 +60,39 @@ sys.exit(0)
 '''
 
 
+# Stand-in for ``ocean``: expects "-nograph -log <log> -replay <script>",
+# records the replayed script next to the netlist dir named inside it, and
+# rewrites the body like the fake si does.
+FAKE_OCEAN = '''\
+import os, re, sys
+
+args = sys.argv[1:]
+assert args[0] == '-nograph', args
+script_path = args[args.index('-replay') + 1]
+with open(script_path) as f:
+    script = f.read()
+proj = re.search(r'"projectDir" \\'string "([^"]+)"', script).group(1)
+cell = re.search(r'design\\("[^"]+" "([^"]+)"', script).group(1)
+nl_dir = os.path.join(proj, cell, 'spectre', 'config', 'netlist')
+with open(os.path.join(nl_dir, 'ocean_invoked.txt'), 'a') as f:
+    f.write(' '.join(args) + '\\n' + script)
+mode_path = os.path.join(nl_dir, 'fake_mode.txt')
+mode = 'rewrite'
+if os.path.exists(mode_path):
+    with open(mode_path) as f:
+        mode = f.read().strip()
+if mode == 'fail':
+    sys.stdout.write('*Error* createNetlist blew up\\n')
+    sys.exit(1)
+if mode == 'rewrite':
+    with open(os.path.join(nl_dir, 'new_body.txt')) as f:
+        new_body = f.read()
+    with open(os.path.join(nl_dir, 'netlist'), 'w') as f:
+        f.write(new_body)
+sys.exit(0)
+'''
+
+
 class StubDb(object):
     """Database interface stub recording create_netlist calls."""
 
@@ -76,6 +109,8 @@ def make_interface(tmp_path, **extra):
     """Build a SpectreInterface over a fake ADE netlist directory."""
     script = tmp_path / 'fake_si.py'
     script.write_text(FAKE_SI)
+    ocean_script = tmp_path / 'fake_ocean.py'
+    ocean_script.write_text(FAKE_OCEAN)
 
     nl_dir = tmp_path / 'sim' / 'tb_cell' / 'spectre' / 'config' / 'netlist'
     nl_dir.mkdir(parents=True)
@@ -89,6 +124,7 @@ def make_interface(tmp_path, **extra):
                     / 'netlist' / 'input.scs'),
         netlist_source='si',
         si_command=[sys.executable, str(script)],
+        ocean_command=[sys.executable, str(ocean_script)],
         si_cwd=str(tmp_path),
     )
     sim_config.update(extra)
@@ -169,6 +205,44 @@ def test_refresh_never_only_checks_existence(tmp_path):
         iface.ensure_netlist(None, 'tb_lib', 'tb_cell')
 
 
+def test_ocean_refresh_splices_new_body_into_deck(tmp_path):
+    iface, nl_dir = make_interface(tmp_path, netlist_source='ocean')
+    deck = iface.ensure_netlist(None, 'tb_lib', 'tb_cell')
+    assert deck == str(nl_dir / 'input.scs')
+    assert (nl_dir / 'input.scs').read_text() == HEADER + BODY_NEW + FOOTER
+    record = (nl_dir / 'ocean_invoked.txt').read_text()
+    # incremental by default; the replayed script names the right design.
+    assert 'createNetlist(?recreateAll nil ?display nil)' in record
+    assert 'design("tb_lib" "tb_cell" "config")' in record
+    assert not (nl_dir / 'si_invoked.txt').exists()
+
+
+def test_ocean_always_forces_full_renetlist(tmp_path):
+    iface, nl_dir = make_interface(tmp_path, netlist_source='ocean',
+                                   netlist_refresh='always')
+    iface.ensure_netlist(None, 'tb_lib', 'tb_cell')
+    record = (nl_dir / 'ocean_invoked.txt').read_text()
+    assert 'createNetlist(?recreateAll t ?display nil)' in record
+
+
+def test_ocean_needs_no_si_env(tmp_path):
+    iface, nl_dir = make_interface(tmp_path, netlist_source='ocean')
+    (nl_dir / 'si.env').unlink()
+    db = StubDb()
+    assert iface.ensure_netlist(db, 'tb_lib', 'tb_cell') \
+        == str(nl_dir / 'input.scs')
+    assert db.calls == []
+
+
+def test_ocean_run_failure_raises_without_ade_fallback(tmp_path):
+    iface, nl_dir = make_interface(tmp_path, netlist_source='ocean')
+    (nl_dir / 'fake_mode.txt').write_text('fail')
+    db = StubDb()
+    with pytest.raises(SiNetlistError):
+        iface.ensure_netlist(db, 'tb_lib', 'tb_cell')
+    assert db.calls == []
+
+
 def test_ade_source_provisions_missing_deck_through_db(tmp_path):
     iface, nl_dir = make_interface(tmp_path, netlist_source='ade')
     (nl_dir / 'input.scs').unlink()
@@ -178,6 +252,6 @@ def test_ade_source_provisions_missing_deck_through_db(tmp_path):
 
 
 def test_unknown_netlist_source_rejected(tmp_path):
-    iface, _nl_dir = make_interface(tmp_path, netlist_source='ocean')
+    iface, _nl_dir = make_interface(tmp_path, netlist_source='adexl')
     with pytest.raises(ValueError):
         iface.ensure_netlist(None, 'tb_lib', 'tb_cell')
