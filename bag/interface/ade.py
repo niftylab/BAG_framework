@@ -92,9 +92,11 @@ class AdexlSession(AdeSession):
 
     #: cellview holding the ADE setup (:class:`MaestroSession` differs).
     tb_view = 'adexl'
-    #: subdirectory of ``<cell>/<tb_view>/results`` holding the run
-    #: history databases ('data' for adexl, 'maestro' for maestro views).
-    results_subdir = 'data'
+    #: subdirectories of ``<cell>/<tb_view>/results`` that may hold the run
+    #: history databases ('data' for adexl; maestro views use 'maestro', or
+    #: 'data' when the setup was authored through ocean-XL).  All candidates
+    #: are polled, so whichever one the run writes is picked up.
+    results_subdirs = ('data',)
     #: seconds to wait for the run history database before giving up.
     sim_timeout = 3600.0
     #: seconds between history database polls.
@@ -240,35 +242,36 @@ class AdexlSession(AdeSession):
         if not os.path.isdir(lib_path):
             raise Exception('run_simulation: cannot resolve library path '
                             'of %s (got %r)' % (lib, lib_path))
-        rdb_dir = os.path.join(lib_path, cell, self.tb_view, 'results',
-                               self.results_subdir)
+        rdb_dirs = [os.path.join(lib_path, cell, self.tb_view, 'results', sub)
+                    for sub in self.results_subdirs]
 
         # snapshot the history databases before submitting so completion is
         # detected as a change against this baseline.  Comparing file mtimes
         # against the local clock does not work here: NFS stamps the files
         # with the file server's clock, which can differ from the client
         # host's by minutes.
-        baseline = self._rdb_snapshot(rdb_dir)
+        baseline = self._rdb_snapshot(rdb_dirs)
         log_sizes = self._job_log_sizes()
         session_name = self._eval_skill(
             'adexl_start_simulation("%s" "%s" "%s")'
             % (lib, cell, self.tb_view)).strip().strip('"')
         try:
-            return self._wait_for_results(rdb_dir, baseline, log_sizes,
+            return self._wait_for_results(rdb_dirs, baseline, log_sizes,
                                           lib, cell)
         finally:
             self._eval_skill('adexl_close_simulation("%s")' % session_name)
 
     @staticmethod
-    def _rdb_snapshot(rdb_dir):
+    def _rdb_snapshot(rdb_dirs):
         """Return {path: (mtime, size)} for the history databases."""
         snap = {}
-        for fname in glob.glob(os.path.join(rdb_dir, '*.rdb')):
-            try:
-                st = os.stat(fname)
-            except OSError:
-                continue
-            snap[fname] = (st.st_mtime, st.st_size)
+        for rdb_dir in rdb_dirs:
+            for fname in glob.glob(os.path.join(rdb_dir, '*.rdb')):
+                try:
+                    st = os.stat(fname)
+                except OSError:
+                    continue
+                snap[fname] = (st.st_mtime, st.st_size)
         return snap
 
     def _job_log_sizes(self):
@@ -301,7 +304,7 @@ class AdexlSession(AdeSession):
                     return '%s: %s' % (fname, line.strip())
         return None
 
-    def _wait_for_results(self, rdb_dir, baseline, log_sizes, lib, cell):
+    def _wait_for_results(self, rdb_dirs, baseline, log_sizes, lib, cell):
         """Poll the history databases until one changes and is readable.
 
         Job logs are watched alongside: after the first error line the
@@ -313,7 +316,7 @@ class AdexlSession(AdeSession):
         fail_reason = None
         while time.time() < deadline:
             time.sleep(self.sim_poll_interval)
-            for fname, state in sorted(self._rdb_snapshot(rdb_dir).items()):
+            for fname, state in sorted(self._rdb_snapshot(rdb_dirs).items()):
                 if baseline.get(fname) == state:
                     continue
                 results = self._read_history_results(fname)
@@ -331,7 +334,8 @@ class AdexlSession(AdeSession):
             'adexl run for %s__%s produced no history result database in '
             '%s within %g seconds; check the ADE-XL job logs '
             '(%s in the workspace).'
-            % (lib, cell, rdb_dir, self.sim_timeout, self.job_log_glob))
+            % (lib, cell, ' / '.join(rdb_dirs), self.sim_timeout,
+               self.job_log_glob))
 
     @staticmethod
     def _read_history_results(rdb_file):
@@ -631,8 +635,9 @@ class MaestroSession(AdexlSession):
     #: is the same environment the run submission requires anyway for ICRP
     #: job dispatch.
     tb_view = 'maestro'
-    #: maestro histories live under results/maestro, not results/data.
-    results_subdir = 'maestro'
+    #: assembler-authored maestro histories live under results/maestro;
+    #: ocean-XL-authored maestro views keep the adexl layout (results/data).
+    results_subdirs = ('maestro', 'data')
 
 
 SESSION_CLASSES = {cls.flavor: cls
