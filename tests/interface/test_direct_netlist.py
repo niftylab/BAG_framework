@@ -89,6 +89,12 @@ if mode == 'rewrite':
         new_body = f.read()
     with open(os.path.join(nl_dir, 'netlist'), 'w') as f:
         f.write(new_body)
+# like the real createNetlist, reassemble input.scs WITHOUT the ADE
+# control section -- the splice must restore it afterwards.
+with open(os.path.join(nl_dir, 'netlist')) as f:
+    body_now = f.read()
+with open(os.path.join(nl_dir, 'input.scs'), 'w') as f:
+    f.write('// ocean-assembled deck\\n' + body_now)
 sys.exit(0)
 '''
 
@@ -223,6 +229,15 @@ def test_ocean_always_forces_full_renetlist(tmp_path):
     iface.ensure_netlist(None, 'tb_lib', 'tb_cell')
     record = (nl_dir / 'ocean_invoked.txt').read_text()
     assert 'createNetlist(?recreateAll t ?display nil)' in record
+
+
+def test_ocean_restores_deck_when_body_unchanged(tmp_path):
+    # createNetlist reassembles input.scs without the ADE control section;
+    # the splice must put the assembled deck back even on a body no-op.
+    iface, nl_dir = make_interface(tmp_path, netlist_source='ocean')
+    (nl_dir / 'fake_mode.txt').write_text('noop')
+    iface.ensure_netlist(None, 'tb_lib', 'tb_cell')
+    assert (nl_dir / 'input.scs').read_text() == HEADER + BODY_OLD + FOOTER
 
 
 def test_ocean_needs_no_si_env(tmp_path):

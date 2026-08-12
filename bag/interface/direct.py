@@ -325,8 +325,16 @@ class DirectSimInterface(SimProcessManager):
         else:
             self._run_ocean(nl_dir, lib, cell, force=force)
         new_body = bag.io.read_file(body_path)
-        if new_body != old_body:
-            bag.io.write_file(deck, deck_text.replace(old_body, new_body, 1))
+        if new_body == old_body:
+            new_deck = deck_text
+        else:
+            new_deck = deck_text.replace(old_body, new_body, 1)
+        # compare against the CURRENT on-disk deck, not the pre-run
+        # snapshot: the ocean runner reassembles input.scs itself (without
+        # the ADE control section), so the spliced deck must be restored
+        # even when the body came back unchanged.
+        if bag.io.read_file(deck) != new_deck:
+            bag.io.write_file(deck, new_deck)
         return deck
 
     def _run_si(self, nl_dir, force=False):
