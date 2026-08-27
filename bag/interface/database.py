@@ -383,9 +383,9 @@ class DbAccess(InterfaceBase, abc.ABC):
         """
         pass
 
-    def get_python_template(self, lib_name, cell_name, primitive_table, sch_info=None):
+    def render_module_skeleton(self, lib_name, cell_name, primitive_table, sch_info=None):
         # type: (str, str, Dict[str, str]) -> str
-        """Returns the default Python Module template for the given schematic.
+        """Render the default Python Module skeleton for the given schematic.
 
         Parameters
         ----------
@@ -454,6 +454,9 @@ class DbAccess(InterfaceBase, abc.ABC):
         else:
             # use default empty template.
             return self.render_file_template('Module.pyi', param_dict)
+
+    # Deprecated alias: sibling checkouts may still call the pre-rename name.
+    get_python_template = render_module_skeleton
 
     def _process_rcx_output(self, netlist, log_fname, lib_name, cell_name, create_schematic):
         if create_schematic:
@@ -643,7 +646,7 @@ class DbAccess(InterfaceBase, abc.ABC):
 
         # generate new design module file if necessary.
         if not os.path.exists(python_file):
-            content = self.get_python_template(lib_name, cell_name,
+            content = self.render_module_skeleton(lib_name, cell_name,
                                                self.db_config.get('prim_table', {}), sch_info=sch_info)
             write_file(python_file, content + '\n', mkdir=False)
 
