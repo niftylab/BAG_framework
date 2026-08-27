@@ -141,6 +141,9 @@ class PVS(VirtuosoChecker):
 
         # Check if gds layout is provided
         gds_layout_path = kwargs.pop('gds_layout_path', None)
+        source_netlist_path = kwargs.pop('source_netlist_path', None)
+        source_cell_name = kwargs.pop('source_cell_name', cell_name)
+        kwargs.pop('source_lib_name', None)
 
         # If not provided the gds layout, need to export layout
         if not gds_layout_path:
@@ -155,9 +158,40 @@ class PVS(VirtuosoChecker):
             copy_cmd = ['cp', gds_layout_path, os.path.abspath(lay_file)]
             flow_list.append((copy_cmd, copy_log_file, None, None, _all_pass))
 
-        cmd, log, env, cwd = self.setup_export_schematic(lib_name, cell_name, sch_file, sch_view,
-                                                         None)
-        flow_list.append((cmd, log, env, cwd, _all_pass))
+        # An externally supplied CDL source (run_lvcdl) replaces the si
+        # auCdl export; copy its directory too so relative includes resolve
+        # from the pvs run directory.
+        if source_netlist_path:
+            if not os.path.exists(source_netlist_path):
+                raise ValueError(
+                    'source_netlist_path does not exist: {}'
+                    .format(source_netlist_path)
+                )
+            source_netlist_path = os.path.abspath(source_netlist_path)
+            source_netlist_dir = os.path.dirname(source_netlist_path)
+            with open_temp(prefix='copySourceTree', dir=run_dir,
+                           delete=True) as f:
+                copy_tree_log_file = f.name
+            copy_tree_cmd = [
+                'cp', '-R', os.path.join(source_netlist_dir, '.'),
+                os.path.abspath(run_dir),
+            ]
+            flow_list.append(
+                (copy_tree_cmd, copy_tree_log_file, None, None, _all_pass)
+            )
+            with open_temp(prefix='copySource', dir=run_dir, delete=True) as f:
+                copy_log_file = f.name
+            copy_cmd = [
+                'cp', source_netlist_path,
+                os.path.abspath(sch_file),
+            ]
+            flow_list.append(
+                (copy_cmd, copy_log_file, None, None, _all_pass)
+            )
+        else:
+            cmd, log, env, cwd = self.setup_export_schematic(lib_name, cell_name, sch_file,
+                                                             sch_view, None)
+            flow_list.append((cmd, log, env, cwd, _all_pass))
 
         lvs_params_actual = self.default_lvs_params.copy()
         if params is not None:
@@ -177,7 +211,7 @@ class PVS(VirtuosoChecker):
         num_cores = 4
         cmd = ['pvs', '-perc', '-lvs', '-qrc_data', '-control', runset_fname, '-dp', str(num_cores),
                '-gds', lay_file, '-layout_top_cell', cell_name,
-               '-source_cdl', sch_file, '-source_top_cell', cell_name,
+               '-source_cdl', sch_file, '-source_top_cell', source_cell_name,
                self.lvs_rule_file,
                ]
 
