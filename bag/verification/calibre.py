@@ -678,10 +678,16 @@ class Calibre(VirtuosoChecker):
             drc_options[key] = val.strip()
 
         rules_file = drc_options.get('drcRulesFile')
-        if rules_file and not os.path.isabs(rules_file):
-            drc_options['drcRulesFile'] = os.path.normpath(
-                os.path.join(self.drc_run_dir, rules_file)
-            )
+        if rules_file:
+            # Tech runsets carry the rule deck as $BAG_WORK_DIR/... or ~/...
+            # so no per-user absolute path lands in git. Expand those before
+            # deciding whether the value is relative to the DRC run dir;
+            # otherwise "$BAG_WORK_DIR/..." is joined under drc_run_dir and
+            # Calibre exits with "Rules File not found" and no summary.
+            rules_file = os.path.expanduser(os.path.expandvars(rules_file))
+            if not os.path.isabs(rules_file):
+                rules_file = os.path.join(self.drc_run_dir, rules_file)
+            drc_options['drcRulesFile'] = os.path.normpath(rules_file)
 
         drc_options['drcRunDir'] = run_dir
         drc_options['drcLayoutPaths'] = gds_file

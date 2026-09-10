@@ -1,3 +1,4 @@
+import os
 import json
 from pathlib import Path
 
@@ -295,3 +296,48 @@ def test_non_calibre_backends_explicitly_reject_drc(checker_cls):
 
     with pytest.raises(NotImplementedError, match=checker_cls.__name__):
         checker.setup_drc_flow('logic_generated', 'inv_lvs_2x')
+
+
+def test_drc_runset_expands_environment_variables_in_rules_path(
+        tmp_path, monkeypatch):
+    # tsmcN28 797480f moved drcRulesFile to $BAG_WORK_DIR/Calibre/... so the
+    # tech repo stops carrying per-user absolute paths. Treating that value as
+    # relative joins it under drc_run_dir and Calibre never finds the rules.
+    work_dir = tmp_path / 'workspace'
+    monkeypatch.setenv('BAG_WORK_DIR', str(work_dir))
+    checker = _make_checker(tmp_path)
+    Path(checker.drc_runset).write_text(
+        '*drcRulesFile: $BAG_WORK_DIR/Calibre/drc/calibre.drc.cell\n',
+        encoding='utf-8',
+    )
+
+    run_dir = tmp_path / 'run'
+    content = checker.modify_drc_runset(
+        str(run_dir), 'logic_generated', 'inv_lvs_2x',
+        str(run_dir / 'layout.gds'),
+    )
+
+    expected = os.path.normpath(
+        str(work_dir / 'Calibre' / 'drc' / 'calibre.drc.cell')
+    )
+    assert '*drcRulesFile: {}\n'.format(expected) in content
+    assert '$BAG_WORK_DIR' not in content
+    assert 'rundir_drc' not in content.split('*drcRulesFile:')[1].split('\n')[0]
+
+
+def test_drc_runset_expands_home_in_rules_path(tmp_path, monkeypatch):
+    home = tmp_path / 'home'
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.setenv('USERPROFILE', str(home))
+    checker = _make_checker(tmp_path)
+    Path(checker.drc_runset).write_text(
+        '*drcRulesFile: ~/Calibre/drc/calibre.drc.cell\n', encoding='utf-8',
+    )
+
+    content = checker.modify_drc_runset(
+        str(tmp_path / 'run'), 'logic_generated', 'inv_lvs_2x',
+        str(tmp_path / 'run' / 'layout.gds'),
+    )
+
+    expected = os.path.normpath(str(home / 'Calibre' / 'drc' / 'calibre.drc.cell'))
+    assert '*drcRulesFile: {}\n'.format(expected) in content
