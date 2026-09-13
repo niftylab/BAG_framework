@@ -854,6 +854,18 @@ class Calibre(VirtuosoChecker):
 
         output_name = '%s.pex.netlist' % cell_name
 
+        rules_file = rcx_options.get('pexRulesFile')
+        if rules_file:
+            # Same treatment as the DRC runset: tech runsets name the rule
+            # deck as $BAG_TECH_CONFIG_DIR/... so no per-user absolute path
+            # lands in git.  Expand before deciding whether the value is
+            # relative to the RCX run dir; otherwise Calibre exits within
+            # seconds with "Rules File ... is not a file".
+            rules_file = os.path.expanduser(os.path.expandvars(rules_file))
+            if not os.path.isabs(rules_file):
+                rules_file = os.path.join(self.rcx_run_dir, rules_file)
+            rcx_options['pexRulesFile'] = os.path.normpath(rules_file)
+
         # override parameters
         rcx_options['pexRunDir'] = run_dir
         rcx_options['pexLayoutPaths'] = gds_file
