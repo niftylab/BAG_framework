@@ -7,6 +7,40 @@
 ; remain in start_bag_ICADV12d3.il, which loads this file before starting
 ; the BAG server.
 
+; Write central corner definitions into an open setup database.
+; spec rows are (name modelfile section enabled temperature), as BAG's
+; read_corner_spec produces from the corner setup database.  ADE-XL's own
+; axlLoadCorners accepts that file and imports nothing from it, and a corner
+; whose model carries no section netlists "include <file>" with no section=
+; at all, which spectre rejects (SFE-675).
+;
+; Only corners that already carry a model are rewritten.  axlPutModel does
+; not create one -- every plausible form was tried on 2026-09-17 -- so a new
+; corner has to come from the testbench's own ocnxlCorner call, which creates
+; the corner and its model but cannot set the section.  The two halves meet
+; here: the author script owns which corners exist, this owns what they mean.
+procedure( bag_apply_corner_spec(sdb spec "gl")
+    let( (cname mfile msect menable mtemp corner model report)
+        report = ""
+        foreach( entry spec
+            cname = nth(0 entry) mfile = nth(1 entry) msect = nth(2 entry)
+            menable = nth(3 entry) mtemp = nth(4 entry)
+            corner = car(errset(axlGetCorner(sdb cname) t))
+            model = and(corner car(errset(axlGetModel(corner "ocnModel0") t)))
+            if( model then
+                errset(axlSetModelFile(model mfile) t)
+                errset(axlSetModelSection(model msect) t)
+                when( nequal(mtemp "") errset(axlPutVar(corner "temperature" mtemp) t) )
+                errset(axlSetEnabled(corner nequal(menable "0")) t)
+                report = strcat(report sprintf(nil "%s=%s " cname msect))
+            else
+                report = strcat(report sprintf(nil "%s=absent " cname))
+            )
+        )
+        report
+    )
+)
+
 ; opens an adexl session.  Returns a list of session name and setup database handle.
 procedure( open_adexl_session(tb_lib tb_cell tb_view session_name mode "ttttt")
     let( (session sdb)
@@ -152,6 +186,7 @@ procedure( instantiate_testbench(tb_cell targ_lib
                                  config_libs config_views config_stops
                                  default_corner corner_file def_files
                                  tech_lib result_file
+                                 @optional (corner_spec_file "")
                                  "tttttttltt")
     let( (session_name session_sdb session sdb test_names test_name test tool_args corner_list
           ade_symbol ade_session output_list tmp_state_name state_obj success)
@@ -223,6 +258,12 @@ procedure( instantiate_testbench(tb_cell targ_lib
             axlCloseSetupDB(sdb)
             axlCloseSession(session)
             error("Error loading corner file %s to %s__%s (%s)" corner_file lib_name cell_name view_name)
+        )
+
+        ; central corner definitions, which axlLoadCorners does not import
+        when( nequal(corner_spec_file "")
+            printf("*Info* corner spec applied -> %L\n"
+                   errset(bag_apply_corner_spec(sdb parse_data_from_file(corner_spec_file)) t))
         )
 
         ; set default corner
@@ -317,7 +358,7 @@ procedure( set_run_options(session sdb run_params "ggl")
 ; tb_view selects the assembler cellview: "adexl" (default) or "maestro".
 ; stim_file, when non-empty, contains a BAG stimulus spec (see
 ; bag_apply_stimuli) applied to the view's single test.
-procedure( modify_testbench(tb_lib tb_cell conf_file opt_file corner_file param_file env_params_file @optional (tb_view "adexl") (stim_file ""))
+procedure( modify_testbench(tb_lib tb_cell conf_file opt_file corner_file param_file env_params_file @optional (tb_view "adexl") (stim_file "") (corner_spec_file ""))
     let( (tmp_list session sdb conf_list run_params corner_list param_values env_param_values
           session_name stim_spec test_names)
         sprintf(session_name "bag_sim_adexl_%s" getCurrentTime())
@@ -338,6 +379,13 @@ procedure( modify_testbench(tb_lib tb_cell conf_file opt_file corner_file param_
         tmp_list = open_adexl_session(tb_lib tb_cell tb_view session_name "a")
         session = car(tmp_list)
         sdb = cadr(tmp_list)
+
+        ; central corner definitions first, so the enable step below
+        ; sees them; axlLoadCorners does not import them itself
+        when( nequal(corner_spec_file "")
+            printf("*Info* corner spec applied -> %L\n"
+                   errset(bag_apply_corner_spec(sdb parse_data_from_file(corner_spec_file)) t))
+        )
 
         ; change corners, parameters, and run options
         enable_adexl_corners( sdb corner_list env_param_values)

@@ -66,7 +66,7 @@ procedure( maestro_get_testbench_info(tb_lib tb_cell result_file "ttt")
 ; defaulting has been exercising it since 2026-08-11.
 procedure( maestro_modify_testbench(tb_lib tb_cell conf_file opt_file corner_file
                                     param_file env_params_file
-                                    @optional (tb_view "maestro") (stim_file "") "ttttttt")
+                                    @optional (tb_view "maestro") (stim_file "") (corner_spec_file "") "ttttttt")
     modify_testbench(tb_lib tb_cell conf_file opt_file corner_file param_file
-                     env_params_file tb_view stim_file)
+                     env_params_file tb_view stim_file corner_spec_file)
 )

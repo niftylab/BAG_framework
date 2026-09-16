@@ -15,6 +15,7 @@ from typing import List, Dict, Optional, Tuple
 
 import glob
 import os
+import re
 import sqlite3
 import time
 
@@ -155,7 +156,7 @@ class AdexlSession(AdeSession):
         cmd = ('instantiate_testbench("{tb_cell}" "{targ_lib}" ' +
                '"{config_libs}" "{config_views}" "{config_stops}" ' +
                '"{default_corner}" "{corner_file}" {def_files} ' +
-               '"{tech_lib}" {result_file})')
+               '"{tech_lib}" {result_file} {corner_spec})')
         cmd = cmd.format(tb_cell=tb_cell,
                          targ_lib=tb_lib,
                          config_libs=tb_config['config_libs'],
@@ -165,9 +166,56 @@ class AdexlSession(AdeSession):
                          corner_file=tb_config['env_file'],
                          def_files=to_skill_list_str(tb_config['def_files']),
                          tech_lib=self.db_config['schematic']['tech_lib'],
-                         result_file='{result_file}')
-        output = yaml.load(self._eval_skill(cmd, out_file='result_file'), Loader=yaml.FullLoader)
+                         result_file='{result_file}',
+                         corner_spec='{corner_spec}')
+        in_files = {'corner_spec': self.read_corner_spec(tb_config)}
+        output = yaml.load(self._eval_skill(cmd, input_files=in_files,
+                                            out_file='result_file'),
+                           Loader=yaml.FullLoader)
         return tb_config['default_env'], output['corners'], output['parameters'], output['outputs']
+
+    @staticmethod
+    def read_corner_spec(tb_config):
+        # type: (Dict[str, Any]) -> List[List[str]]
+        """Read the central corner definitions named by ``corner_file``.
+
+        ADE-XL's own ``axlLoadCorners`` accepts a corner setup database and
+        imports nothing from it, so the corners are applied by SKILL instead;
+        this turns the file into rows of
+        ``[name, model file, section, enabled, temperature]``.  A missing or
+        unset file yields no rows, which leaves every setup as it is.
+        """
+        path = tb_config.get('corner_file', '')
+        if not path:
+            return []
+        real = os.path.expandvars(path)
+        if not os.path.isfile(real):
+            return []
+        with open(real, 'r') as spec_file:
+            text = spec_file.read()
+        block = re.search(r'<corners>.*?</corners>', text, re.DOTALL)
+        if block is None:
+            return []
+        rows = []
+        corners = re.findall(r'<corner([^>]*)>([A-Za-z_]\w*)(.*?)'
+                             r'(?=<corner[^>]*>|</corners>)',
+                             block.group(0), re.DOTALL)
+        for attrs, name, body in corners:
+            if name == '_default':
+                continue
+            files = re.findall(r'<modelfile>(.*?)</modelfile>', body, re.DOTALL)
+            if not files:
+                continue
+            sections = re.findall(r'<modelsection>(.*?)</modelsection>', body,
+                                  re.DOTALL)
+            temps = re.findall(r'<var>temperature\s*<value>(.*?)</value>', body,
+                               re.DOTALL)
+            rows.append([name,
+                         files[0].strip(),
+                         sections[0].strip().strip('"') if sections else '',
+                         '1' if 'enabled="1"' in attrs else '0',
+                         temps[0].strip() if temps else ''])
+        return rows
 
     def get_testbench_info(self, tb_lib, tb_cell):
         """Returns information about an existing testbench.
@@ -230,7 +278,7 @@ class AdexlSession(AdeSession):
         """
 
         cmd = ('%s("%s" "%s" {conf_rules} {run_opts} '
-               '{sim_envs} {params} {env_params} "%s" {stimuli})'
+               '{sim_envs} {params} {env_params} "%s" {stimuli} {corner_spec})'
                % (self.modify_fn, lib, cell, self.tb_view))
         in_files = {'conf_rules': config_rules,
                     'run_opts': [],
@@ -238,6 +286,10 @@ class AdexlSession(AdeSession):
                     'params': list(parameters.items()),
                     'env_params': list(zip(sim_envs, env_parameters)),
                     'stimuli': stimuli_to_spec(stimuli),
+                    # the maestro flavor never runs instantiate_testbench,
+                    # so the central corners are applied here too
+                    'corner_spec': self.read_corner_spec(
+                        self.db_config['testbench']),
                     }
         self._eval_skill(cmd, input_files=in_files)
 
