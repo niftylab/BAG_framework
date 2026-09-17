@@ -41,6 +41,27 @@ procedure( bag_apply_corner_spec(sdb spec "gl")
     )
 )
 
+; Turn off the nominal point when a corner is enabled.
+; ADE always carries a "_default" corner that simulates the test's own model
+; libraries.  Once the enabled corner selects the same model section, the two
+; points compute the same thing and every run pays for it twice.  The nominal
+; point is only dropped when some other corner is actually enabled, so a setup
+; with no enabled corner still has a point to run.
+procedure( bag_disable_nominal_corner(sdb "g")
+    let( (nominal live)
+        live = setof(nm cadr(axlGetCorners(sdb))
+                     nequal(nm "_default") && axlGetEnabled(axlGetCorner(sdb nm)))
+        nominal = car(errset(axlGetCorner(sdb "_default") t))
+        if( and(nominal live) then
+            errset(axlSetEnabled(nominal nil) t)
+            sprintf(nil "_default off, corners %L (now %L)" live
+                    errset(axlGetEnabled(nominal) t))
+        else
+            sprintf(nil "_default kept, corners %L" live)
+        )
+    )
+)
+
 ; opens an adexl session.  Returns a list of session name and setup database handle.
 procedure( open_adexl_session(tb_lib tb_cell tb_view session_name mode "ttttt")
     let( (session sdb)
@@ -389,6 +410,8 @@ procedure( modify_testbench(tb_lib tb_cell conf_file opt_file corner_file param_
 
         ; change corners, parameters, and run options
         enable_adexl_corners( sdb corner_list env_param_values)
+        printf("*Info* nominal point -> %L\n"
+               errset(bag_disable_nominal_corner(sdb) t))
         set_adexl_parameters( sdb param_values )
         set_run_options( session sdb run_params )
 
