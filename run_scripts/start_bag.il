@@ -1582,7 +1582,7 @@ procedure( copy_testbench(master_lib master_cell targ_lib
         ; create target library if does not exist
         unless( tlib_obj = ddGetObj(targ_lib nil nil nil nil "r")
             when( and(new_lib_path (new_lib_path != "."))
-                new_lib_path = strcat(new_lib_path "/" lib_name)
+                new_lib_path = strcat(new_lib_path "/" targ_lib)
             )
             tlib_obj = ddCreateLib(targ_lib new_lib_path)
             ; attach technology file
