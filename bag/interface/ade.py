@@ -16,8 +16,10 @@ from typing import List, Dict, Optional, Tuple
 import glob
 import os
 import re
+import shutil
 import sqlite3
 import time
+import xml.etree.ElementTree as ElementTree
 
 import yaml
 
@@ -39,6 +41,69 @@ def stimuli_to_spec(stimuli):
     if not stimuli:
         return ['clear']
     return ['set'] + stimuli
+
+
+def _test_options(test, section):
+    """Return {option name: value} of one ``<test>`` options section."""
+    options = {}
+    node = test.find(section)
+    if node is None:
+        return options
+    for option in node.findall('option'):
+        name = (option.text or '').strip()
+        value = option.findtext('value')
+        if name and value is not None:
+            options[name] = value.strip()
+    return options
+
+
+def restore_missing_test_states(view_dir):
+    # type: (str) -> List[str]
+    """Recreate the active test states a setup database names but lacks.
+
+    An ADE-XL/maestro setup (``<view_dir>/data.sdb``) runs each test from
+    the state named by its ``tooloptions`` (``<tb>_active`` once the setup
+    has been opened), while the authored state stays under ``origoptions``
+    (``<tb>_import``).  Only the ``_import`` state is kept in version
+    control: the ``_active`` one is rewritten by every run.  In a checkout
+    where the setup has never run, the active state directory is therefore
+    missing, and the run submission then never dispatches -- the ICRP job
+    only logs "timed out after no activity".  Seeding the missing state
+    from the authored one reproduces what a first run in the authoring
+    checkout had.
+
+    Parameters
+    ----------
+    view_dir : str
+        the setup cellview directory (``<lib>/<cell>/<adexl|maestro>``).
+
+    Returns
+    -------
+    restored : list[str]
+        the test state directories created.
+    """
+    try:
+        root = ElementTree.parse(os.path.join(view_dir, 'data.sdb')).getroot()
+    except (OSError, ElementTree.ParseError):
+        return []
+    restored = []
+    for test in root.iterfind('./active/tests/test'):
+        cur = _test_options(test, 'tooloptions')
+        orig = _test_options(test, 'origoptions')
+        state, orig_state = cur.get('state'), orig.get('state')
+        if not state or not orig_state or state == orig_state:
+            continue
+        path = cur.get('path', '').replace('$AXL_SETUPDB_DIR', view_dir)
+        orig_path = orig.get('path', '').replace('$AXL_SETUPDB_DIR', view_dir)
+        if '$' in path or '$' in orig_path:
+            continue
+        target = os.path.normpath(os.path.join(path, state))
+        source = os.path.normpath(os.path.join(orig_path, orig_state))
+        if os.path.exists(target) or not os.path.isdir(source):
+            continue
+        shutil.copytree(source, target)
+        restored.append(target)
+    return restored
 
 
 class AdeSession(object):
@@ -129,6 +194,14 @@ class AdexlSession(AdeSession):
     #: a history database (netlist errors, license failures) only surface
     #: here; without this the poll would sit out the full timeout.
     job_log_glob = os.path.join('logs_*', 'logs*', 'Job*.log')
+    #: job-log substrings that mark a failed run.
+    job_log_error_marks = ('ERROR (', '*Error*')
+    #: an idle ICRP job logs this before it is killed.  It is harmless after
+    #: the job has run its points, but a job the main session never handed
+    #: a test to (no ``job_log_configured_mark``) means the run was never
+    #: dispatched, with no ERROR line anywhere.
+    job_log_idle_mark = 'timed out after no activity'
+    job_log_configured_mark = 'Configuring the session'
 
     def configure_testbench(self, tb_lib, tb_cell):
         """Update testbench state for the given testbench.
@@ -291,7 +364,29 @@ class AdexlSession(AdeSession):
                     'corner_spec': self.read_corner_spec(
                         self.db_config['testbench']),
                     }
+        self._restore_test_states(lib, cell)
         self._eval_skill(cmd, input_files=in_files)
+
+    def _lib_path(self, lib):
+        """Return the library directory the live session resolves."""
+        lib_path = self._eval_skill('ddGetObj("%s")~>readPath' % lib).strip().strip('"')
+        if not os.path.isdir(lib_path):
+            raise Exception('cannot resolve library path of %s (got %r)'
+                            % (lib, lib_path))
+        return lib_path
+
+    def _restore_test_states(self, lib, cell, lib_path=None):
+        """Seed active test states missing from this checkout.
+
+        See :func:`restore_missing_test_states`; must run before the setup
+        is opened for a write or a run submission.
+        """
+        if lib_path is None:
+            lib_path = self._lib_path(lib)
+        view_dir = os.path.join(lib_path, cell, self.tb_view)
+        for target in restore_missing_test_states(view_dir):
+            print('restored missing test state %s from the authored setup'
+                  % os.path.relpath(target, view_dir), flush=True)
 
     def run_simulation(self, lib, cell, res_file_name=None):
         """Run the testbench's saved ADE-XL setup and return its outputs.
@@ -313,10 +408,8 @@ class AdexlSession(AdeSession):
             (several corners/sweep points) each value is a dict keyed by
             the run's point ID instead of a scalar.
         """
-        lib_path = self._eval_skill('ddGetObj("%s")~>readPath' % lib).strip().strip('"')
-        if not os.path.isdir(lib_path):
-            raise Exception('run_simulation: cannot resolve library path '
-                            'of %s (got %r)' % (lib, lib_path))
+        lib_path = self._lib_path(lib)
+        self._restore_test_states(lib, cell, lib_path)
         rdb_dirs = [os.path.join(lib_path, cell, self.tb_view, 'results', sub)
                     for sub in self.results_subdirs]
 
@@ -375,9 +468,22 @@ class AdexlSession(AdeSession):
             except OSError:
                 continue
             for line in chunk.splitlines():
-                if 'ERROR (' in line or '*Error*' in line:
+                if any(mark in line for mark in self.job_log_error_marks):
                     return '%s: %s' % (fname, line.strip())
+                if (self.job_log_idle_mark in line
+                        and not self._job_was_configured(fname)):
+                    return ('%s: %s (the job never received a test; check '
+                            'that the setup\'s test states exist)'
+                            % (fname, line.strip()))
         return None
+
+    def _job_was_configured(self, fname):
+        """Return True if the job log shows a test handed to the job."""
+        try:
+            with open(fname, 'r', errors='replace') as stream:
+                return self.job_log_configured_mark in stream.read()
+        except OSError:
+            return True
 
     def _wait_for_results(self, rdb_dirs, baseline, log_sizes, lib, cell):
         """Poll the history databases until one changes and is readable.
