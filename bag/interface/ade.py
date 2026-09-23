@@ -14,11 +14,14 @@ database configuration (falling back to the interface class default).
 from typing import List, Dict, Optional, Tuple
 
 import glob
+import json
 import os
 import re
 import shutil
 import sqlite3
 import time
+import uuid
+import warnings
 import xml.etree.ElementTree as ElementTree
 
 import yaml
@@ -637,8 +640,8 @@ class AdelSession(AdexlSession):
 
     The testbench is opened in place: the OA schematic, config view, and
     the saved ADE state (``spectre_state1``) must already exist in the
-    testbench library.  ``run_simulation`` drives ``adel_run_simulation``
-    through the skill server.
+    testbench library. Run submission and status polling are separate SKILL
+    calls so Virtuoso can process completion events between requests.
 
     Inherits :class:`AdexlSession` so ``get_testbench_info`` keeps its
     historical (ADE-XL path) behavior, matching the old
@@ -803,18 +806,63 @@ class AdelSession(AdexlSession):
         raise Exception('adel_create_netlist did not produce %s within %g s'
                         % (deck, self.netlist_timeout))
 
+    sim_error_grace = 30.0
+
     def run_simulation(self, lib, cell, res_file_name=None):
-        """Run ADE-L simulation"""
-        if res_file_name is None:
-            res_file_name = 'sim_results.yaml'
-        save_dir = bag.io.make_temp_dir(prefix='adel_data', parent_dir=self.tmp_dir)
-        save_full_path = save_dir + '/' + res_file_name
-        cmd = ('adel_run_simulation("%s" "%s" "%s")' % (lib, cell, save_full_path))
-        self._eval_skill(cmd)
-        if os.path.exists(save_full_path):
-            with open(save_full_path, 'r') as stream:
-                results = yaml.load(stream, Loader=yaml.FullLoader)
-        return results
+        """Submit ADE-L, poll without blocking its event loop, always close.
+
+        A unique run token prevents a previous run's outputs from being read.
+        Saved setup changes belong to update_testbench; running never rewrites
+        the source ADE state. Cleanup discards only this run's transient state.
+        """
+        token = uuid.uuid4().hex
+        args = ' '.join(json.dumps(value) for value in
+                        (lib, cell, token, self.tb_ade_view))
+        deadline = time.monotonic() + self.sim_timeout
+        error_deadline = None
+        failure = None
+        try:
+            self._eval_skill('adel_start_simulation(%s)' % args)
+            while time.monotonic() < deadline:
+                state = yaml.safe_load(self._eval_skill(
+                    'adel_poll_simulation("%s" {result_file})' % token,
+                    out_file='result_file'))
+                status = state.get('status') if isinstance(state, dict) else None
+                if status == 'complete':
+                    results = state.get('outputs')
+                    if not isinstance(results, dict) or not results:
+                        raise RuntimeError('ADE-L returned no evaluated outputs')
+                    missing = [name for name, value in results.items()
+                               if value is None or value == 'nil']
+                    if missing:
+                        raise RuntimeError('ADE-L output evaluation failed: %s'
+                                           % ', '.join(missing))
+                    save_dir = bag.io.make_temp_dir(prefix='adel_data', parent_dir=self.tmp_dir)
+                    with open(os.path.join(save_dir, res_file_name or 'sim_results.yaml'), 'w') as stream:
+                        yaml.safe_dump(results, stream)
+                    return results
+                if status == 'error':
+                    failure = state.get('detail', 'unknown ADE-L error')
+                    if error_deadline is None:
+                        error_deadline = time.monotonic() + self.sim_error_grace
+                elif status != 'pending':
+                    raise RuntimeError('Invalid ADE-L run status: %r' % state)
+                if error_deadline is not None and time.monotonic() >= error_deadline:
+                    raise RuntimeError('ADE-L failed for %s/%s: %s' % (lib, cell, failure))
+                time.sleep(min(self.sim_poll_interval, max(0, deadline - time.monotonic())))
+            raise TimeoutError('ADE-L did not complete %s/%s within %g seconds%s'
+                               % (lib, cell, self.sim_timeout,
+                                  ': ' + str(failure) if failure else ''))
+        finally:
+            # Preserve the simulation/transport exception if cleanup also fails.
+            import sys
+            failed = sys.exc_info()[0] is not None
+            try:
+                self._eval_skill('adel_close_simulation("%s")' % token)
+            except Exception as exc:
+                if not failed:
+                    raise
+                warnings.warn('ADE-L cleanup failed for %s/%s: %s' % (lib, cell, exc))
 
 
 class MaestroSession(AdexlSession):

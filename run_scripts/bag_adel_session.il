@@ -185,94 +185,98 @@ procedure( adel_create_netlist(tb_lib tb_cell @optional (tb_ade_view "spectre_st
     );let
 );procedure
 
-; run an ade-l simulation.
-; Polls the CIW log until the ADE-L run finishes.  A failed netlist/run or a
-; poll timeout closes the ADE session and raises error() instead of polling
-; forever, so a failed run no longer blocks the BAG skill server until
-; Virtuoso is restarted.  timeout bounds the total wait in seconds; after the
-; first error line polling continues only err_grace more seconds in case the
-; completion message still arrives (recoverable errors lose to a success).
-procedure( adel_run_simulation(tb_lib tb_cell res_file_name @optional (tb_ade_view "spectre_state1") (timeout 3600) (err_grace 30))
-    let( (session_name sev_sess_sess sev_session session p line start_line
-          log_lines line_no finish fail_reason elapsed deadline out_list state_obj)
-        sprintf(session_name "bag_sim_adel_%s" getCurrentTime())
-        ; remember how many log lines exist before the run starts so only
-        ; output from this run is scanned: a stale ADE-3071/error line from a
-        ; previous run in the same session must not affect this run.
-        start_line = 0
-        p = infile( hiGetLogFileName())
-        when( p
-            while( gets( line p )
-                start_line = start_line + 1
-            ); while
-            close(p)
-        );when
-        sev_sess_sess = open_adel_session(tb_lib tb_cell "config" tb_ade_view session_name "a")
-        sev_session = car(sev_sess_sess)
-        session = cadr(sev_sess_sess)
-        ;asiNetlist(session)
-        ;asiRunSimulation(session)
-        sevNetlistAndRun(sev_session)
-        ;wait until the simulation is completed, failed, or timed out.
-        finish = nil
-        fail_reason = nil
-        elapsed = 0
-        deadline = timeout
-        while( !finish && elapsed < deadline
-            sleep(5)  ; wait to allow the simulation to run.
-            elapsed = elapsed + 5
-            ; load the log lines appended after the run started.
-            log_lines = list()
-            line_no = 0
-            p = infile( hiGetLogFileName())
-            when( p
-                while( gets( line p )
-                    line_no = line_no + 1
-                    when( line_no > start_line
-                        log_lines = append1(log_lines line)
-                    );when
-                ); while
-                close(p)
-            );when
-            foreach( log_line log_lines
-                cond(
-                    ( index(log_line "INFO (ADE-3071): Simulation completed successfully.")
-                        printf( "*INFO* Simulation completed \n")
-                        finish = 't
-                    )
-                    ( !fail_reason && (index(log_line "ERROR (") || index(log_line "*Error*") || substring(log_line 1 2) == "\\e")
-                        fail_reason = log_line
-                    )
-                );cond
-            );foreach
-            ; after the first error line keep polling only a short grace
-            ; period in case the completion message still arrives.
-            when( fail_reason && deadline > elapsed + err_grace
-                deadline = elapsed + err_grace
-            );when
-        ); while
-        unless( finish
-            errset(sevQuit(sev_session) t)
-            unless( fail_reason
-                sprintf(fail_reason "no completion message within %L seconds" timeout)
-            );unless
-            error("adel_run_simulation failed for %s__%s: %s" tb_lib tb_cell fail_reason)
-        );unless
-        ; read out the results.
-        out_list=asiGetOutputList(session)
-        p = outfile( res_file_name "w" )
-        foreach( out out_list
-            if((out~>name) then
-                fprintf( p "%s: %L\n" out~>name out~>value )
-            );if
-        );foreach
-        close(p)
-        ; delete original ade view to update
-        state_obj = ddGetObj(tb_lib tb_cell tb_ade_view)
-        ddDeleteObj(state_obj)
+; Run state is kept only for BAG-owned ADE sessions. A poll never sleeps:
+; returning to the event loop lets ADE finish and evaluate its outputs.
+unless(boundp('bag_adel_runs) bag_adel_runs = makeTable('bag_adel_runs nil))
 
-        ; save and close
-        asiSaveState(session ?name tb_ade_view ?option 'cellview ?lib tb_lib ?cell tb_cell)
-        sevQuit(sev_session)
-    );let
-);procedure
+; ADE-L caches asimenv save/exit preferences in each session at creation.
+; Changing envSetVal just before sevQuit does not change an existing session.
+; Disable queries only on the BAG-owned session; global preferences stay intact.
+procedure(bag_adel_quit(sev_session)
+    unless(isCallable('sevSetSaveQuery) && isCallable('_sevSetADELExitQuery)
+        error("ADE-L session query setters unavailable; refusing modal cleanup")
+    )
+    sevSetSaveQuery(sev_session nil)
+    _sevSetADELExitQuery(sev_session nil)
+    sevQuit(sev_session)
+)
+
+procedure(adel_start_simulation(tb_lib tb_cell token @optional (tb_ade_view "spectre_state1"))
+    let((pair run p line count)
+        when(bag_adel_runs[token] error("ADE-L run token already active: %s" token))
+        pair = open_adel_session(tb_lib tb_cell "config" tb_ade_view token "a")
+        run = makeTable('bag_adel_run nil)
+        run['sev] = car(pair)
+        run['asi] = cadr(pair)
+        bag_adel_runs[token] = run
+        run['log] = hiGetLogFileName()
+        count = 0
+        p = infile(run['log])
+        when(p
+            while(gets(line p) count = count + 1)
+            close(p)
+        )
+        run['line] = count
+        sevNetlistAndRun(run['sev])
+        t
+    )
+)
+
+procedure(adel_poll_simulation(token result_file)
+    let((run p line count finish failure outputs)
+        run = bag_adel_runs[token]
+        unless(run error("Unknown ADE-L run token: %s" token))
+        count = 0
+        p = infile(run['log])
+        when(p
+            while(gets(line p)
+                count = count + 1
+                when(count > run['line]
+                    cond(
+                        (index(line "INFO (ADE-3071): Simulation completed successfully.")
+                            finish = t)
+                        (!failure && (index(line "ERROR (") || index(line "ERROR:") ||
+                                      index(line "*Error*") || index(line "INFO (ADE-3069):"))
+                            failure = line)
+                    )
+                )
+            )
+            close(p)
+        )
+        p = outfile(result_file "w")
+        cond(
+            (finish
+                fprintf(p "status: complete\noutputs:\n")
+                outputs = setof(out asiGetOutputList(run['asi]) out->name)
+                if(outputs then
+                    foreach(out outputs fprintf(p "  %L: %L\n" out->name out->value))
+                else
+                    fprintf(p "  {}\n")
+                )
+            )
+            (failure
+                ; A YAML literal preserves quotes/backslashes from tool errors.
+                fprintf(p "status: error\ndetail: |\n  %s\n" failure))
+            (t fprintf(p "status: pending\n"))
+        )
+        close(p)
+        t
+    )
+)
+
+procedure(adel_close_simulation(token)
+    let((run)
+        run = bag_adel_runs[token]
+        when(run
+            bag_adel_quit(run['sev])
+            remove(token bag_adel_runs)
+        )
+        t
+    )
+)
+
+; Fail fast for clients predating the asynchronous protocol. A blocking
+; compatibility implementation would reintroduce the event-loop deadlock.
+procedure(adel_run_simulation(@rest args)
+    error("Reload BAG Python and use AdelSession.run_simulation (asynchronous ADE-L protocol)")
+)
