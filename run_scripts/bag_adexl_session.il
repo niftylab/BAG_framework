@@ -487,8 +487,16 @@ procedure( adexl_start_simulation(tb_lib tb_cell @optional (tb_view "adexl"))
             axlCommitSetupDB(sdb)
             axlCloseSetupDB(sdb)
             axlCloseSession(session)
-            open_adexl_session(tb_lib tb_cell tb_view session_name "a")
+            session_sdb = open_adexl_session(tb_lib tb_cell tb_view session_name "a")
+            sdb = cadr(session_sdb)
         )
+        ; a saved setup keeps "_default" enabled next to its corners, and
+        ; corners without an enabled= attribute count as enabled, so the run
+        ; would simulate the nominal point as well.  Drop it here too, not only
+        ; in modify_testbench: runners that submit the saved setup as-is never
+        ; go through modify_testbench.
+        printf("*Info* nominal point -> %L\n"
+               errset(bag_disable_nominal_corner(sdb) t))
         axlRunSimulation(?session session_name)
         session_name
     )

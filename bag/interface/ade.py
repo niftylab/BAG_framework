@@ -558,6 +558,25 @@ class AdexlSession(AdeSession):
                                     % (', '.join(failed), rdb_file))
                 return None
             rows = valued
+            # the session is closed as soon as results are returned, which
+            # kills every point still simulating ("SPECTRE-25 ... the current
+            # ADE session is lost").  Wait for all points, and fail on a
+            # point that stopped without values instead of returning the
+            # other points' results as if the run had passed.
+            status = AdexlSession._point_status(con)
+            if status is not None:
+                if any(stop in (None, '') for _c, stop in status.values()):
+                    return None
+                valued_points = {p for p, _n, _v, _e in rows}
+                dead = sorted(p for p in status if p not in valued_points)
+                if dead:
+                    raise Exception(
+                        'adexl run point(s) %s stopped without results%s '
+                        '(see %s)'
+                        % (', '.join('%d (corner %s)'
+                                     % (p, status[p][0] or 'nominal')
+                                     for p in dead),
+                           AdexlSession._run_error_messages(con), rdb_file))
             points = sorted({p for p, _n, _v, _e in rows})
             if len(points) <= 1:
                 return {name: value for _p, name, value, _e in rows}
@@ -567,6 +586,50 @@ class AdexlSession(AdeSession):
             return multi
         finally:
             con.close()
+
+    @staticmethod
+    def _point_status(con):
+        """Return {pointID: (corner name, stopTime)} for every run point.
+
+        Returns None for a history database without the point/status
+        tables, so older schemas keep the first-result behavior.  A point
+        with no status row yet has not started and counts as unfinished.
+        """
+        try:
+            rows = con.execute(
+                'SELECT p.pointID, c.name, s.stopTime FROM point p '
+                'LEFT JOIN corner c ON p.cornerID = c.cornerID '
+                'LEFT JOIN testStatus s ON s.pointID = p.pointID').fetchall()
+        except sqlite3.Error:
+            return None
+        if not rows:
+            return None
+        status = {}
+        for point, corner, stop in rows:
+            # several tests per point give several rows; unfinished wins
+            if status.get(point, (None, ''))[1] is not None:
+                status[point] = (corner, stop)
+        return status
+
+    @staticmethod
+    def _run_error_messages(con):
+        """Return the run's recorded error messages as a short suffix."""
+        try:
+            msgs = [row[0] for row in con.execute('SELECT message FROM error')]
+        except sqlite3.Error:
+            return ''
+        lines = []
+        for msg in msgs:
+            if msg in (None, 'running', 'done'):
+                continue
+            for line in str(msg).splitlines():
+                line = line.strip()
+                if 'ERROR' in line:
+                    lines.append(line)
+                    break
+            else:
+                lines.append(str(msg).strip().splitlines()[0])
+        return (': ' + ' | '.join(lines)) if lines else ''
 
 
 class AdelSession(AdexlSession):
