@@ -52,6 +52,17 @@ class ModuleDB(MasterDB):
         self._exc_libs = set(sch_exc_libs)
         self.lib_path = lib_path
 
+    def read_schematic_info(self, yaml_fname):
+        """Use the selected source; retain YAML behavior for legacy projects."""
+        info = read_yaml(yaml_fname)
+        if (self._prj is not None and info['lib_name'] != 'BAG_prim'
+                and info['lib_name'] not in self._exc_libs):
+            reader = getattr(self._prj.impl_db, 'read_source_info', None)
+            if reader is not None:
+                return reader(info['lib_name'], info['cell_name'],
+                              instance_names=info['instances'])
+        return info
+
     def create_master_instance(self, gen_cls, lib_name, params, used_cell_names, **kwargs):
         # type: (Type[Module], str, Dict[str, Any], Set[str], **Any) -> Module
         """Create a new non-finalized master instance.
@@ -410,7 +421,8 @@ class Module(DesignMaster, metaclass=abc.ABCMeta):
         self._pin_list = None
 
         self._yaml_fname = os.path.abspath(yaml_fname)
-        self.sch_info = read_yaml(self._yaml_fname)
+        self.sch_info = (read_yaml(self._yaml_fname) if self.is_primitive()
+                         else database.read_schematic_info(self._yaml_fname))
 
         self._orig_lib_name = self.sch_info['lib_name']
         self._orig_cell_name = self.sch_info['cell_name']

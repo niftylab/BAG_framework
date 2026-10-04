@@ -568,10 +568,17 @@ class BagProject(object):
         db_config = self.bag_config['database']
         db_cls = _import_class_from_str(db_config['class'])
         db_requires_server = getattr(db_cls, 'requires_server', True)
+        schematic_io = db_config.get('schematic_io')
+        if schematic_io is not None:
+            from .interface.schematic import SchematicInterface, validate_io
+            db_requires_server = validate_io(schematic_io)
+            db_cls = SchematicInterface
 
         # Server-backed databases use the configured ZMQ port.  Local
         # databases, such as annotated netlist backends, need no socket.
         if db_requires_server and port is None:
+            if schematic_io is not None and 'socket' not in self.bag_config:
+                raise ValueError('OA schematic input/output requires BAG socket configuration')
             socket_config = self.bag_config['socket']
             if 'port_file' in socket_config:
                 port, msg = _get_port_number(socket_config['port_file'])
@@ -598,9 +605,12 @@ class BagProject(object):
             self._default_lib_path = self.impl_db.default_lib_path
         elif not db_requires_server:
             # Local database backends have no external server/dealer.
-            self.impl_db = db_cls(bag_tmp_dir, db_config)
+            self.impl_db = (db_cls(None, bag_tmp_dir, db_config) if schematic_io is not None
+                            else db_cls(bag_tmp_dir, db_config))
             self._default_lib_path = self.impl_db.default_lib_path
         else:
+            if schematic_io is not None:
+                raise ValueError('OA schematic input/output requires a BAG server port')
             self.impl_db = None  # type: Optional[DbAccess]
             self._default_lib_path = DbAccess.get_default_lib_path(db_config)
 
