@@ -51,6 +51,10 @@ def test_routes_use_selected_source_and_writer(tmp_path, monkeypatch, source, ou
     db = SchematicInterface(object() if 'oa' in (source, output) else None, None, db_config)
     info = db.read_source_info('logic_templates', 'inv')
     assert info['instances']['MN0']['instpins']['G']['net_name'] == ('IN' if source == 'cdl' else 'OA_INPUT')
+    # BagProject/batch_schematic enters here, not through create_implementation.
+    db.instantiate_schematic('generated', [
+        ('logic_templates', 'inv', 'inv_out', {}, {}, []),
+    ])
     result = db.create_implementation('generated', [('logic_templates', 'inv', 'inv_out')], [{}])
     if output == 'cdl':
         text = Path(result[0]).read_text()

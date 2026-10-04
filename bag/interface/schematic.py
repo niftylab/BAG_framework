@@ -12,6 +12,7 @@ from pathlib import Path
 import yaml
 
 from .cdl import CdlInterface
+from .database import DbAccess
 from ..io.cdl import load_schematic_library
 
 
@@ -60,6 +61,11 @@ class SchematicInterface:
 
     def __getattr__(self, name):
         return getattr(self.output, name)
+
+    def instantiate_schematic(self, lib_name, content_list, lib_path=''):
+        # Bind the shared formatter to this router. Delegating this call to the
+        # output backend would bypass source preparation and template rendering.
+        return DbAccess.instantiate_schematic(self, lib_name, content_list, lib_path)
 
     def parse_schematic_template(self, lib_name, cell_name):
         return self.source.parse_schematic_template(lib_name, cell_name)
