@@ -76,6 +76,45 @@ procedure( open_adexl_session(tb_lib tb_cell tb_view session_name mode "ttttt")
     )
 )
 
+; Close an assembler setup database and its session.  Both calls are
+; guarded so a handle the body already released is harmless.
+procedure( bag_close_adexl_session(session sdb)
+    when( sdb errset(axlCloseSetupDB(sdb) t) )
+    when( session errset(axlCloseSession(session) t) )
+    t
+)
+
+; Open the setup database of tb_lib/tb_cell/tb_view in the given mode, run
+; body(session sdb) on it and close both whatever happens.
+;
+; Every setup edit used to open in "a" mode and close only on its last
+; line, so an error anywhere in between (ADEXL-2404 inside a corner edit, an
+; unsupported run mode, a view with several tests) left the view open for
+; writing.  The next open of the same view then failed with ADEXL-9072 /
+; "Cannot load adexl database" for the rest of the Virtuoso session
+; (observed 2026-09-23 and again in the tutorial 5-8 student runs,
+; 2026-10).  The error is re-raised after the close so the python caller
+; still sees it; on the error path the database is closed without commit,
+; discarding the partial edit.
+procedure( bag_with_adexl_session(tb_lib tb_cell tb_view session_name mode body)
+    let( (session_sdb session sdb result msg)
+        session_sdb = open_adexl_session(tb_lib tb_cell tb_view session_name mode)
+        session = car(session_sdb)
+        sdb = cadr(session_sdb)
+        result = errset(funcall(body session sdb) t)
+        unless( result
+            ; same message slot stdoutHandler (start_bag_ICADV12d3.il) relays
+            ; to python; nil when the interpreter did not fill errset.errset
+            msg = car(nthelem(5 errset.errset)) || "see CDS.log"
+        )
+        bag_close_adexl_session(session sdb)
+        unless( result
+            error("%s on %s__%s (%s) failed: %s" session_name tb_lib tb_cell tb_view msg)
+        )
+        car(result)
+    )
+)
+
 ; Enables only the given corners in the simulation setup database.
 procedure( enable_adexl_corners( sdb corner_list env_param_list "gll")
     let( (env_name par_val_list corner)
@@ -209,8 +248,7 @@ procedure( instantiate_testbench(tb_cell targ_lib
                                  tech_lib result_file
                                  @optional (corner_spec_file "")
                                  "tttttttltt")
-    let( (session_name session_sdb session sdb test_names test_name test tool_args corner_list
-          ade_symbol ade_session output_list tmp_state_name state_obj success)
+    let( (session_name tmp_state_name state_obj success)
 
         tmp_state_name = "orig_state"
 
@@ -230,77 +268,72 @@ procedure( instantiate_testbench(tb_cell targ_lib
         session_name = sprintf(nil "modify_adexl_%d" bag_modify_adexl_counter)
         bag_modify_adexl_counter = bag_modify_adexl_counter + 1
 
-        session_sdb = open_adexl_session(targ_lib tb_cell "adexl" session_name "a")
-        session = car(session_sdb)
-        sdb = cadr(session_sdb)
+        bag_with_adexl_session(targ_lib tb_cell "adexl" session_name "a"
+            lambda( (session sdb)
+                let( (test_names test_name test tool_args corner_list ade_symbol ade_session
+                      output_list)
+                    ; check that only one test is defined
+                    test_names = cadr(axlGetTests(sdb))
+                    when(length(test_names) != 1
+                        error("ADEXL testbench must have exactly 1 test defined.")
+                    )
 
-        ; check that only one test is defined
-        test_names = cadr(axlGetTests(sdb))
-        when(length(test_names) != 1
-            axlCommitSetupDB(sdb)
-            axlCloseSetupDB(sdb)
-            axlCloseSession(session)
-            error("ADEXL testbench must have exactly 1 test defined.")
+                    ; save current test setup state
+                    axlSaveSetupState(session "adexl_default" "All")
+
+                    ; change all tests to use config view, and set all test's definition files
+                    ; also get a list of defined output expressions
+                    ; step 1: get ADE session
+                    test_name = car(test_names)
+                    ade_symbol = axlGetToolSession(session_name test_name)
+                    ade_session = asiGetSession(ade_symbol)
+                    ; step 2: save original ADE session
+                    asiSaveState(ade_session ?name tmp_state_name ?option 'cellview ?lib targ_lib ?cell tb_cell)
+                    ; step 3: change test library
+                    test = axlGetTest(sdb test_name)
+                    tool_args = axlGetTestToolArgs(test)
+                    set_assoc_list(tool_args "view" "config")
+                    set_assoc_list(tool_args "lib" targ_lib)
+                    set_assoc_list(tool_args "cell" tb_cell)
+                    axlSetTestToolArgs(test tool_args)
+                    ; step 4: reopen ADE session, then load original ADE state
+                    ade_symbol = axlGetToolSession(session_name test_name)
+                    ade_session = asiGetSession(ade_symbol)
+                    asiLoadState(ade_session ?name tmp_state_name ?option 'cellview)
+                    asiSetEnvOptionVal(ade_session 'definitionFiles def_files)
+                    output_list = setof(ele asiGetOutputList(ade_session) ele->name)
+                    ; step 5: delete temporary ADE session state
+                    state_obj = ddGetObj(targ_lib tb_cell tmp_state_name)
+                    ddDeleteObj(state_obj)
+
+                    axlMainAppSaveSetup(session_name)
+
+                    ; load corner
+                    unless(axlLoadCorners(sdb corner_file)
+                        error("Error loading corner file %s to %s__%s (adexl)" corner_file targ_lib tb_cell)
+                    )
+
+                    ; central corner definitions, which axlLoadCorners does not import
+                    when( nequal(corner_spec_file "")
+                        printf("*Info* corner spec applied -> %L\n"
+                               errset(bag_apply_corner_spec(sdb parse_data_from_file(corner_spec_file)) t))
+                    )
+
+                    ; set default corner
+                    corner_list = list(default_corner)
+                    enable_adexl_corners(sdb corner_list nil)
+
+                    ; write testbench information to file
+                    write_testbench_info_to_file(sdb result_file output_list corner_list)
+
+                    ; save; bag_with_adexl_session closes the database and session
+                    axlSaveSetupState(session "adexl_default" "All")
+                    axlSaveSetupState(session "ocean_default" "All")
+                    axlMainAppSaveSetup(session_name)
+                    axlCommitSetupDB(sdb)
+                )
+            )
         )
-
-        ; save current test setup state
-        axlSaveSetupState(session "adexl_default" "All")
-
-        ; change all tests to use config view, and set all test's definition files
-        ; also get a list of defined output expressions
-        ; step 1: get ADE session
-        test_name = car(test_names)
-        ade_symbol = axlGetToolSession(session_name test_name)
-        ade_session = asiGetSession(ade_symbol)
-        ; step 2: save original ADE session
-        asiSaveState(ade_session ?name tmp_state_name ?option 'cellview ?lib targ_lib ?cell tb_cell)
-        ; step 3: change test library
-        test = axlGetTest(sdb test_name)
-        tool_args = axlGetTestToolArgs(test)
-        set_assoc_list(tool_args "view" "config")
-        set_assoc_list(tool_args "lib" targ_lib)
-        set_assoc_list(tool_args "cell" tb_cell)
-        axlSetTestToolArgs(test tool_args)
-        ; step 4: reopen ADE session, then load original ADE state
-        ade_symbol = axlGetToolSession(session_name test_name)
-        ade_session = asiGetSession(ade_symbol)
-        asiLoadState(ade_session ?name tmp_state_name ?option 'cellview)
-        asiSetEnvOptionVal(ade_session 'definitionFiles def_files)
-        output_list = setof(ele asiGetOutputList(ade_session) ele->name)
-        ; step 5: delete temporary ADE session state
-        state_obj = ddGetObj(targ_lib tb_cell tmp_state_name)
-        ddDeleteObj(state_obj)
-
-        axlMainAppSaveSetup(session_name)
-
-        ; load corner
-        unless(axlLoadCorners(sdb corner_file)
-            axlCommitSetupDB(sdb)
-            axlCloseSetupDB(sdb)
-            axlCloseSession(session)
-            error("Error loading corner file %s to %s__%s (%s)" corner_file lib_name cell_name view_name)
-        )
-
-        ; central corner definitions, which axlLoadCorners does not import
-        when( nequal(corner_spec_file "")
-            printf("*Info* corner spec applied -> %L\n"
-                   errset(bag_apply_corner_spec(sdb parse_data_from_file(corner_spec_file)) t))
-        )
-
-        ; set default corner
-        corner_list = list(default_corner)
-        enable_adexl_corners(sdb corner_list nil)
-
-        ; write testbench information to file
-        write_testbench_info_to_file(sdb result_file output_list corner_list)
-
-        ; save and close
-        axlSaveSetupState(session "adexl_default" "All")
-        axlSaveSetupState(session "ocean_default" "All")
-        axlMainAppSaveSetup(session_name)
-        axlCommitSetupDB(sdb)
-        axlCloseSetupDB(sdb)
-        axlCloseSession(session)
     )
 )
 
@@ -308,39 +341,35 @@ procedure( instantiate_testbench(tb_cell targ_lib
 ; tb_view selects the assembler cellview: "adexl" (default) or "maestro"
 ; (ADE Assembler shares the axl* API, cf. bag_maestro_session.il).
 procedure( get_testbench_info(tb_lib tb_cell result_file @optional (tb_view "adexl"))
-    let( (session_name session_sdb session sdb test_names test_name ade_symbol asi_sess
-        output_list corner_list en_list success)
+    let( (session_name)
         session_name = "read_adexl"
-        session_sdb = open_adexl_session(tb_lib tb_cell tb_view session_name "r")
-        session = car(session_sdb)
-        sdb = cadr(session_sdb)
+        bag_with_adexl_session(tb_lib tb_cell tb_view session_name "r"
+            lambda( (session sdb)
+                let( (test_names test_name ade_symbol asi_sess output_list corner_list en_list)
+                    ; check that only one test is defined
+                    test_names = cadr(axlGetTests(sdb))
+                    when(length(test_names) != 1
+                        error("ADEXL testbench must have exactly 1 test defined.")
+                    )
 
-        ; check that only one test is defined
-        test_names = cadr(axlGetTests(sdb))
-        when(length(test_names) != 1
-            axlCommitSetupDB(sdb)
-            axlCloseSetupDB(sdb)
-            axlCloseSession(session)
-            error("ADEXL testbench must have exactly 1 test defined.")
+                    ; get output list
+                    test_name = car(test_names)
+                    ade_symbol = axlGetToolSession(session_name test_name)
+                    asi_sess = sevEnvironment(ade_symbol)
+                    output_list = setof(ele asiGetOutputList(asi_sess) ele->name)
+
+                    ; get enabled corners
+                    corner_list = cadr(axlGetCorners(sdb))
+                    en_list = setof(corner corner_list axlGetEnabled(axlGetCorner(sdb corner)))
+
+                    ; write testbench information to file
+                    write_testbench_info_to_file(sdb result_file output_list en_list)
+
+                    ; bag_with_adexl_session closes the database and session
+                    axlCommitSetupDB(sdb)
+                )
+            )
         )
-
-        ; get output list
-        test_name = car(test_names)
-        ade_symbol = axlGetToolSession(session_name test_name)
-        asi_sess = sevEnvironment(ade_symbol)
-        output_list = setof(ele asiGetOutputList(asi_sess) ele->name)
-
-        ; get enabled corners
-        corner_list = cadr(axlGetCorners(sdb))
-        en_list = setof(corner corner_list axlGetEnabled(axlGetCorner(sdb corner)))
-
-        ; write testbench information to file
-        write_testbench_info_to_file(sdb result_file output_list en_list)
-
-        ; close
-        axlCommitSetupDB(sdb)
-        axlCloseSetupDB(sdb)
-        axlCloseSession(session)
     )
 )
 
@@ -356,7 +385,8 @@ procedure( set_run_options(session sdb run_params "ggl")
                   (run_mode == "Monte Carlo Sampling"
                    opt_list = '("mcnumpoints" "mcmethod") )
                   ('t
-                      axlCloseSession(session)
+                      ; the caller's bag_with_adexl_session closes the
+                      ; database and session
                       error("Unsupported run mode: %s" run_mode) )
             )
             foreach( opt_name opt_list
@@ -380,8 +410,7 @@ procedure( set_run_options(session sdb run_params "ggl")
 ; stim_file, when non-empty, contains a BAG stimulus spec (see
 ; bag_apply_stimuli) applied to the view's single test.
 procedure( modify_testbench(tb_lib tb_cell conf_file opt_file corner_file param_file env_params_file @optional (tb_view "adexl") (stim_file "") (corner_spec_file ""))
-    let( (tmp_list session sdb conf_list run_params corner_list param_values env_param_values
-          session_name stim_spec test_names)
+    let( (conf_list run_params corner_list param_values env_param_values session_name stim_spec)
         sprintf(session_name "bag_sim_adexl_%s" getCurrentTime())
 
         ; read inputs from file.
@@ -397,46 +426,46 @@ procedure( modify_testbench(tb_lib tb_cell conf_file opt_file corner_file param_
             edit_config_view(tb_lib tb_cell "config" conf_list)
         )
 
-        tmp_list = open_adexl_session(tb_lib tb_cell tb_view session_name "a")
-        session = car(tmp_list)
-        sdb = cadr(tmp_list)
+        bag_with_adexl_session(tb_lib tb_cell tb_view session_name "a"
+            lambda( (session sdb)
+                let( (test_names)
+                    ; central corner definitions first, so the enable step below
+                    ; sees them; axlLoadCorners does not import them itself
+                    when( nequal(corner_spec_file "")
+                        printf("*Info* corner spec applied -> %L\n"
+                               errset(bag_apply_corner_spec(sdb parse_data_from_file(corner_spec_file)) t))
+                    )
 
-        ; central corner definitions first, so the enable step below
-        ; sees them; axlLoadCorners does not import them itself
-        when( nequal(corner_spec_file "")
-            printf("*Info* corner spec applied -> %L\n"
-                   errset(bag_apply_corner_spec(sdb parse_data_from_file(corner_spec_file)) t))
+                    ; change corners, parameters, and run options
+                    enable_adexl_corners( sdb corner_list env_param_values)
+                    printf("*Info* nominal point -> %L\n"
+                           errset(bag_disable_nominal_corner(sdb) t))
+                    set_adexl_parameters( sdb param_values )
+                    set_run_options( session sdb run_params )
+
+                    ; apply BAG stimuli to the test's ADE session (cf. the definition-file
+                    ; write in instantiate_testbench, which uses the same tool-session path).
+                    ; axlSaveSetup (the GUI save) pushes the tool-session change into the
+                    ; ACTIVE test state; on maestro views the state saves below only
+                    ; capture it in the named side states, and the run netlists from the
+                    ; active state (verified on IC618, 2026-08-12 -- adexl views happen to
+                    ; sync the active state through axlMainAppSaveSetup, maestro views do
+                    ; not).
+                    when( stim_spec
+                        test_names = cadr(axlGetTests(sdb))
+                        bag_apply_stimuli(asiGetSession(axlGetToolSession(session_name car(test_names)))
+                                          tb_lib tb_cell stim_spec)
+                        axlSaveSetup(session_name)
+                    )
+
+                    ; save; bag_with_adexl_session closes the database and session
+                    axlSaveSetupState(session "adexl_default" "All")
+                    axlSaveSetupState(session "ocean_default" "All")
+                    axlMainAppSaveSetup(session_name)
+                    axlCommitSetupDB(sdb)
+                )
+            )
         )
-
-        ; change corners, parameters, and run options
-        enable_adexl_corners( sdb corner_list env_param_values)
-        printf("*Info* nominal point -> %L\n"
-               errset(bag_disable_nominal_corner(sdb) t))
-        set_adexl_parameters( sdb param_values )
-        set_run_options( session sdb run_params )
-
-        ; apply BAG stimuli to the test's ADE session (cf. the definition-file
-        ; write in instantiate_testbench, which uses the same tool-session path).
-        ; axlSaveSetup (the GUI save) pushes the tool-session change into the
-        ; ACTIVE test state; on maestro views the state saves below only
-        ; capture it in the named side states, and the run netlists from the
-        ; active state (verified on IC618, 2026-08-12 -- adexl views happen to
-        ; sync the active state through axlMainAppSaveSetup, maestro views do
-        ; not).
-        when( stim_spec
-            test_names = cadr(axlGetTests(sdb))
-            bag_apply_stimuli(asiGetSession(axlGetToolSession(session_name car(test_names)))
-                              tb_lib tb_cell stim_spec)
-            axlSaveSetup(session_name)
-        )
-
-        ; save and close
-        axlSaveSetupState(session "adexl_default" "All")
-        axlSaveSetupState(session "ocean_default" "All")
-        axlMainAppSaveSetup(session_name)
-        axlCommitSetupDB(sdb)
-        axlCloseSetupDB(sdb)
-        axlCloseSession(session)
     )
 )
 
@@ -470,7 +499,7 @@ procedure( modify_testbench(tb_lib tb_cell conf_file opt_file corner_file param_
 ; that already carry a run mode (e.g. GUI-configured or maestro views)
 ; are left untouched.
 procedure( adexl_start_simulation(tb_lib tb_cell @optional (tb_view "adexl"))
-    let( (session_name session_sdb session sdb mode)
+    let( (session_name session_sdb session sdb mode msg)
         sprintf(session_name "bag_axl_%s_%s" tb_lib tb_cell)
         ; a stale same-name session (e.g. from an interrupted earlier run)
         ; blocks axlCreateSession; drop it first.
@@ -488,6 +517,7 @@ procedure( adexl_start_simulation(tb_lib tb_cell @optional (tb_view "adexl"))
             axlCloseSetupDB(sdb)
             axlCloseSession(session)
             session_sdb = open_adexl_session(tb_lib tb_cell tb_view session_name "a")
+            session = car(session_sdb)
             sdb = cadr(session_sdb)
         )
         ; a saved setup keeps "_default" enabled next to its corners, and
@@ -497,7 +527,14 @@ procedure( adexl_start_simulation(tb_lib tb_cell @optional (tb_view "adexl"))
         ; go through modify_testbench.
         printf("*Info* nominal point -> %L\n"
                errset(bag_disable_nominal_corner(sdb) t))
-        axlRunSimulation(?session session_name)
+        ; a submission failure must not leave the "a"-mode database open:
+        ; the python caller only reaches adexl_close_simulation once this
+        ; procedure has returned the session name.
+        unless( errset(axlRunSimulation(?session session_name) t)
+            msg = car(nthelem(5 errset.errset)) || "see CDS.log"
+            bag_close_adexl_session(session sdb)
+            error("adexl_start_simulation on %s__%s (%s) failed: %s" tb_lib tb_cell tb_view msg)
+        )
         session_name
     )
 )
