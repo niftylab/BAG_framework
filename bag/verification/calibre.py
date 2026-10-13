@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Optional, List, Tuple, Dict, Any, Sequence
 import fnmatch
 import json
 import os
+import sys
+import tempfile
 import re
 import subprocess
 import shutil
@@ -517,6 +519,8 @@ class Calibre(VirtuosoChecker):
 
         return flow_list
 
+    RCX_FILE_INPUT_VERSION = 1
+
     def setup_rcx_flow(self, lib_name, cell_name, sch_view='schematic', lay_view='layout',
                        params=None, **kwargs):
         # type: (str, str, str, str, Optional[Dict[str, Any]], Any) -> Sequence[FlowInfo]
@@ -525,6 +529,19 @@ class Calibre(VirtuosoChecker):
         rcx_params_actual = self.default_rcx_params.copy()
         if params is not None:
             rcx_params_actual.update(params)
+
+        gds_layout_path = kwargs.pop('gds_layout_path', None)
+        source_netlist_path = kwargs.pop('source_netlist_path', None)
+        source_lib_name = kwargs.pop('source_lib_name', lib_name)
+        source_cell_name = kwargs.pop('source_cell_name', cell_name)
+        for key, path in [('gds_layout_path', gds_layout_path), ('source_netlist_path', source_netlist_path)]:
+            if path is not None and not os.path.isfile(path):
+                raise ValueError('{} is not a file: {}'.format(key, path))
+        if source_netlist_path is not None:
+            from .input_files import cdl_files
+            cdl_files(source_netlist_path)  # Validate includes before scheduling any export.
+        if (source_lib_name != lib_name or source_cell_name != cell_name) and self.rcx_mode != 'pex':
+            raise ValueError('Distinct RCX source identifiers require the Calibre PEX backend')
 
         run_dir = os.path.join(self.rcx_run_dir, lib_name, cell_name)
         os.makedirs(run_dir, exist_ok=True)
@@ -544,9 +561,9 @@ class Calibre(VirtuosoChecker):
         with open_temp(prefix='rcxLog', dir=run_dir, delete=False) as logf:
             log_file = logf.name
         flow_list = []
-
-        # Check if gds layout is provided
-        gds_layout_path = kwargs.pop('gds_layout_path', None)
+        if source_netlist_path is not None:
+            # Never overwrite the caller's source if it is already in this run directory.
+            sch_file = os.path.join(tempfile.mkdtemp(prefix='rcx_source_', dir=run_dir), 'schematic.net')
 
         # If not provided the gds layout, need to export layout
         if not gds_layout_path:
@@ -558,12 +575,20 @@ class Calibre(VirtuosoChecker):
                 raise ValueError(f'gds_layout_path does not exist: {gds_layout_path}')
             with open_temp(prefix='copy', dir=run_dir, delete=True) as f:
                 copy_log_file = f.name
-            copy_cmd = ['cp', gds_layout_path, os.path.abspath(lay_file)]
-            flow_list.append((copy_cmd, copy_log_file, None, None, _all_pass))
+            if not (os.path.isfile(lay_file) and os.path.samefile(gds_layout_path, lay_file)):
+                copy_cmd = ['cp', gds_layout_path, os.path.abspath(lay_file)]
+                flow_list.append((copy_cmd, copy_log_file, None, None, lambda rc, log: rc == 0))
 
-        cmd, log, env, cwd = self.setup_export_schematic(lib_name, cell_name, sch_file, sch_view,
-                                                         None)
-        flow_list.append((cmd, log, env, cwd, _all_pass))
+        if source_netlist_path is not None:
+            with open_temp(prefix='copySource', dir=run_dir, delete=False) as f:
+                copy_log = f.name
+            cmd = [sys.executable, '-m', 'bag.verification.input_files',
+                   os.path.abspath(source_netlist_path), os.path.abspath(sch_file)]
+            flow_list.append((cmd, copy_log, None, None, lambda rc, log: rc == 0))
+        else:
+            cmd, log, env, cwd = self.setup_export_schematic(lib_name, cell_name, sch_file, sch_view,
+                                                             None)
+            flow_list.append((cmd, log, env, cwd, _all_pass))
 
         if self.rcx_mode == 'starrc' or self.rcx_mode == 'qrc':
             # check if LVS was run prior to run_rcx
@@ -603,6 +628,9 @@ class Calibre(VirtuosoChecker):
 
                 cmd = ['qrc', '-64', '-cmd', cmd_fname]
         elif self.rcx_mode == 'pex':
+            if source_netlist_path is not None:
+                rcx_params_actual['pexSourceLibrary'] = source_lib_name
+                rcx_params_actual['pexSourcePrimary'] = source_cell_name
             # generate new runset
             runset_content, result = self.modify_pex_runset(run_dir, lib_name, cell_name, lay_view,
                                                             lay_file, sch_file, rcx_params_actual)

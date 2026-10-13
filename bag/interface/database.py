@@ -544,6 +544,9 @@ class DbAccess(InterfaceBase, abc.ABC):
         log_fname : str
             name of the RCX log file.
         """
+        if (any(kwargs.get(key) is not None for key in ('source_netlist_path','gds_layout_path')) and
+                getattr(self.checker, 'RCX_FILE_INPUT_VERSION', 0) < 1):
+            raise ValueError('RCX file inputs are not supported by this checker')
         kwargs['params'] = kwargs.pop('rcx_params', None)
         netlist, log_fname = await self.checker.async_run_rcx(lib_name, cell_name, **kwargs)
 
