@@ -115,11 +115,69 @@ def _matches_any(value, patterns):
     return any(fnmatch.fnmatchcase(value, pattern) for pattern in patterns)
 
 
-def _load_drc_waivers(policy_file, policy_profile, runset_file, lib_name):
-    # type: (str, str, str, str) -> Tuple[bool, Dict[str, str]]
+_DRC_WAIVER_WHERE = ('anywhere', 'boundary')
+
+
+def _load_drc_policy(policy_file):
+    # type: (str) -> Dict[str, Any]
     policy = read_yaml(policy_file)
     if not isinstance(policy, dict):
         raise ValueError('DRC policy root must be a mapping.')
+    version = policy.get('version', 1)
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise ValueError('DRC policy version must be a positive integer.')
+    return policy
+
+
+def _resolve_drc_profile(policy, policy_level, policy_profile):
+    # type: (Dict[str, Any], Optional[str], Optional[str]) -> str
+    """Map a hierarchy level (cell/block/chip) to a profile name through ``levels:``.
+
+    The map lives in the policy file so that a requester names only a level and
+    never a waiver list.  A level the file does not declare is an error (the
+    judgement fails closed), and without a level the profile is used directly.
+    """
+    if policy_level:
+        if policy.get('version', 1) < 2:
+            if policy_level == 'cell' and policy_profile:
+                # A version 1 file knows only the cell-level profile; that is
+                # what level "cell" means, so the named profile stands.
+                return policy_profile
+            raise ValueError(
+                'DRC policy levels need version 2 (got level {}).'.format(policy_level)
+            )
+        levels = policy.get('levels')
+        if not isinstance(levels, dict) or not levels:
+            raise ValueError('DRC policy declares no levels map.')
+        profile = levels.get(policy_level)
+        if not isinstance(profile, str) or not profile:
+            raise ValueError(
+                'DRC policy level not found: {}'.format(policy_level)
+            )
+        if policy_profile and policy_profile != profile:
+            raise ValueError(
+                'DRC policy level {} maps to {}, not {}.'.format(
+                    policy_level, profile, policy_profile
+                )
+            )
+        return profile
+    if not policy_profile:
+        raise ValueError('DRC policy needs a profile or a level.')
+    return policy_profile
+
+
+def _load_drc_waivers(policy_file, policy_profile, runset_file, lib_name,
+                      policy=None):
+    # type: (str, str, str, str, Optional[Dict[str, Any]]) -> Tuple[bool, Dict[str, Dict[str, Any]]]
+    """Return (in_scope, {rule: {'reason', 'where', 'margin_um'}}) for a profile.
+
+    ``where`` is ``anywhere`` (the rule's whole count is waived, version 1
+    behaviour) or ``boundary`` (version 2: only markers that touch the judged
+    cell's extent within ``margin_um`` are waived; the rest stay violations).
+    """
+    if policy is None:
+        policy = _load_drc_policy(policy_file)
+    version = policy.get('version', 1)
     profiles = policy.get('profiles', {})
     profile = profiles.get(policy_profile)
     if not isinstance(profile, dict):
@@ -140,8 +198,13 @@ def _load_drc_waivers(policy_file, policy_profile, runset_file, lib_name):
     if not in_scope:
         return False, {}
 
+    default_margin = profile.get('boundary_margin_nm', 0)
+    if isinstance(default_margin, bool) or not isinstance(default_margin, (int, float)) \
+            or default_margin < 0:
+        raise ValueError('DRC policy boundary_margin_nm must be a non-negative number.')
+
     waivers = {}
-    for entry in profile.get('waive', []):
+    for entry in profile.get('waive', []) or []:
         if not isinstance(entry, dict) or not entry.get('rule'):
             raise ValueError('Each DRC waiver requires a rule.')
         reason = entry.get('reason')
@@ -149,20 +212,125 @@ def _load_drc_waivers(policy_file, policy_profile, runset_file, lib_name):
             raise ValueError(
                 'DRC waiver {} requires a reason.'.format(entry['rule'])
             )
-        waivers[str(entry['rule'])] = str(reason)
+        where = entry.get('where', 'anywhere')
+        if where not in _DRC_WAIVER_WHERE:
+            raise ValueError(
+                'DRC waiver {} has unknown where: {}'.format(entry['rule'], where)
+            )
+        margin = entry.get('margin_nm', default_margin)
+        if isinstance(margin, bool) or not isinstance(margin, (int, float)) or margin < 0:
+            raise ValueError(
+                'DRC waiver {} margin_nm must be a non-negative number.'.format(entry['rule'])
+            )
+        if where != 'anywhere' and version < 2:
+            raise ValueError(
+                'DRC waiver {} uses where: {} which needs policy version 2.'.format(
+                    entry['rule'], where
+                )
+            )
+        waivers[str(entry['rule'])] = {
+            'reason': str(reason),
+            'where': where,
+            'margin_um': float(margin) / 1000.0,
+        }
     return True, waivers
+
+
+def _drc_results_markers(content, rule_names):
+    # type: (str, Sequence[str]) -> Dict[str, List[Tuple[float, float, float, float]]]
+    """Marker bounding boxes (micrometres) per rule from a Calibre ASCII results file.
+
+    A rule block is the rule name on its own line followed by the
+    ``<n> <count> <count> <timestamp>`` line; markers inside it are
+    ``<p|e> <id> <npoints>`` followed by the vertices (``x y`` per line for a
+    polygon, ``x1 y1 x2 y2`` for an edge pair).  Description lines never match
+    the marker header and are skipped.
+    """
+    wanted = set(rule_names)
+    lines = content.splitlines()
+    if not lines:
+        return {}
+    header = lines[0].split()
+    precision = 1000.0
+    if len(header) > 1:
+        try:
+            precision = float(header[1])
+        except ValueError:
+            pass
+    marker_re = re.compile(r'^([pe])\s+(\d+)\s+(\d+)')
+    count_re = re.compile(r'^\d+\s+\d+\s+\d+(\s|$)')
+    num_re = re.compile(r'^-?\d+$')
+    out = {}  # type: Dict[str, List[Tuple[float, float, float, float]]]
+    cur = None
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if (stripped and not marker_re.match(lines[i]) and i + 1 < len(lines)
+                and count_re.match(lines[i + 1].strip())):
+            cur = stripped if stripped in wanted else None
+            if cur is not None:
+                out.setdefault(cur, [])
+            i += 2
+            continue
+        match = marker_re.match(lines[i])
+        if match and cur is not None:
+            npts = int(match.group(3))
+            pts = []
+            for k in range(1, npts + 1):
+                if i + k < len(lines):
+                    q = lines[i + k].split()
+                    if len(q) in (2, 4) and all(num_re.match(v) for v in q):
+                        for j in range(0, len(q), 2):
+                            pts.append((int(q[j]) / precision, int(q[j + 1]) / precision))
+            if pts:
+                xs = [pt[0] for pt in pts]
+                ys = [pt[1] for pt in pts]
+                out[cur].append((min(xs), min(ys), max(xs), max(ys)))
+            i += npts + 1
+            continue
+        i += 1
+    return out
+
+
+def _touches_boundary(marker, extent, margin_um):
+    # type: (Tuple[float, float, float, float], Tuple[float, float, float, float], float) -> bool
+    """True when the marker comes within ``margin_um`` of any edge of the extent."""
+    return (marker[0] <= extent[0] + margin_um or marker[1] <= extent[1] + margin_um
+            or marker[2] >= extent[2] - margin_um or marker[3] >= extent[3] - margin_um)
+
+
+def _find_drc_results_file(run_dir, cell_name):
+    # type: (str, Optional[str]) -> Optional[str]
+    candidates = []
+    if cell_name:
+        candidates.append(os.path.join(run_dir, '{}.drc.results'.format(cell_name)))
+    candidates.append(os.path.join(run_dir, 'drc.results'))
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    return None
 
 
 # noinspection PyUnusedLocal
 def drc_passed(retcode, log_file, summary_file, policy_file=None,
                policy_profile=None, runset_file=None, lib_name=None,
-               cell_name=None, run_dir=None):
-    # type: (int, str, str, Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]) -> Tuple[bool, str]
-    """Check Calibre DRC and optionally apply an auditable rule waiver policy."""
+               cell_name=None, run_dir=None, policy_level=None,
+               gds_file=None, results_file=None):
+    # type: (int, str, str, Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]) -> Tuple[bool, str]
+    """Check Calibre DRC and optionally apply an auditable rule waiver policy.
+
+    ``policy_level`` (``cell``/``block``/...) selects the profile through the
+    policy file's ``levels:`` map; ``policy_profile`` names it directly.  A
+    waiver with ``where: boundary`` is applied per marker against the extent of
+    the judged cell read from ``gds_file`` (default ``<run_dir>/layout.gds``),
+    using the markers in ``results_file`` (default ``<run_dir>/<cell>.drc.results``).
+    When the extent or the rule's markers are unavailable such a waiver does not
+    apply and the rule's whole count stays a violation.
+    """
     audit_dir = run_dir or os.path.dirname(summary_file)
     audit_file = os.path.join(audit_dir, 'drc_policy_result.json')
     result = {
-        'schema_version': 1,
+        'schema_version': 2,
         'library': lib_name,
         'cell': cell_name,
         'runset': runset_file,
@@ -170,6 +338,7 @@ def drc_passed(retcode, log_file, summary_file, policy_file=None,
         'execution_log': log_file,
         'policy_file': policy_file,
         'policy_profile': policy_profile,
+        'policy_level': policy_level,
         'raw_passed': False,
         'policy_passed': False,
         'raw_violation_count': None,
@@ -178,6 +347,10 @@ def drc_passed(retcode, log_file, summary_file, policy_file=None,
         'rule_counts': {},
         'waived_rules': {},
         'remaining_rules': {},
+        'boundary_waivers': {},
+        'remaining_markers': {},
+        'extent': None,
+        'extent_source': 'unavailable',
     }
 
     try:
@@ -209,34 +382,97 @@ def drc_passed(retcode, log_file, summary_file, policy_file=None,
         result['raw_passed'] = raw_count == 0
         result['rule_counts'] = rule_counts
 
-        if bool(policy_file) != bool(policy_profile):
+        if bool(policy_file) != bool(policy_profile or policy_level):
             raise ValueError(
-                'Both drc_policy_file and drc_policy_profile are required.'
+                'drc_policy_file needs drc_policy_profile or a policy level, and vice versa.'
             )
 
-        waivers = {}
+        waivers = {}  # type: Dict[str, Dict[str, Any]]
         in_scope = False
         if policy_file:
+            policy = _load_drc_policy(policy_file)
+            policy_profile = _resolve_drc_profile(policy, policy_level, policy_profile)
+            result['policy_profile'] = policy_profile
             in_scope, waivers = _load_drc_waivers(
-                policy_file, policy_profile, runset_file, lib_name
+                policy_file, policy_profile, runset_file, lib_name, policy=policy
             )
         result['policy_in_scope'] = in_scope
 
-        waived_rules = {
-            rule: count
-            for rule, count in rule_counts.items()
-            if rule in waivers
-        }
-        remaining_rules = {
-            rule: count
-            for rule, count in rule_counts.items()
-            if rule not in waivers
-        }
+        boundary_rules = [
+            rule for rule in rule_counts
+            if rule in waivers and waivers[rule]['where'] == 'boundary'
+        ]
+        extent = None
+        markers = {}  # type: Dict[str, List[Tuple[float, float, float, float]]]
+        if boundary_rules:
+            gds_path = gds_file or (os.path.join(audit_dir, 'layout.gds') if audit_dir else None)
+            if gds_path and os.path.isfile(gds_path) and cell_name:
+                try:
+                    from .gds_extent import gds_cell_extent
+                    extent = gds_cell_extent(gds_path, cell_name)
+                    result['extent'] = list(extent)
+                    result['extent_source'] = 'gds'
+                except Exception as err:  # fail closed: boundary waivers stay violations
+                    result['extent_error'] = '{}: {}'.format(type(err).__name__, err)
+            results_path = results_file or _find_drc_results_file(audit_dir, cell_name)
+            if results_path and os.path.isfile(results_path):
+                markers = _drc_results_markers(read_file(results_path), boundary_rules)
+                result['results_file'] = results_path
+
+        waived_rules = {}
+        remaining_rules = {}
+        for rule, count in rule_counts.items():
+            waiver = waivers.get(rule)
+            if waiver is None:
+                remaining_rules[rule] = count
+                continue
+            if waiver['where'] == 'anywhere':
+                waived_rules[rule] = count
+                continue
+            # where: boundary -- judged per marker, never per summary count.
+            margin = waiver['margin_um']
+            rule_markers = markers.get(rule)
+            entry = {
+                'summary_count': count,
+                'marker_count': len(rule_markers) if rule_markers is not None else None,
+                'margin_um': margin,
+            }
+            if extent is None:
+                entry['scope'] = 'extent_unavailable'
+                remaining_rules[rule] = count
+            elif not rule_markers:
+                entry['scope'] = 'no_markers'
+                remaining_rules[rule] = count
+            else:
+                waived = [m for m in rule_markers if _touches_boundary(m, extent, margin)]
+                kept = [m for m in rule_markers if not _touches_boundary(m, extent, margin)]
+                entry['scope'] = 'boundary'
+                if len(rule_markers) == count:
+                    waived_count = len(waived)
+                else:
+                    # Summary and results disagree: never waive more than the
+                    # summary counts and never fewer violations than the
+                    # interior markers seen.
+                    waived_count = min(count, len(waived))
+                    if count - waived_count < len(kept):
+                        waived_count = max(0, count - len(kept))
+                remaining_count = count - waived_count
+                if waived_count:
+                    waived_rules[rule] = waived_count
+                if remaining_count:
+                    remaining_rules[rule] = remaining_count
+                    result['remaining_markers'][rule] = [
+                        [round(v, 6) for v in m] for m in kept
+                    ]
+            entry['waived'] = waived_rules.get(rule, 0)
+            entry['remaining'] = remaining_rules.get(rule, 0)
+            result['boundary_waivers'][rule] = entry
+
         waived_count = min(raw_count, sum(waived_rules.values()))
         remaining_count = raw_count - waived_count
         result['waived_rules'] = waived_rules
         result['waiver_reasons'] = {
-            rule: waivers[rule] for rule in waived_rules
+            rule: waivers[rule]['reason'] for rule in waived_rules
         }
         result['remaining_rules'] = remaining_rules
         result['waived_violation_count'] = waived_count

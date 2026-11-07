@@ -341,3 +341,220 @@ def test_drc_runset_expands_home_in_rules_path(tmp_path, monkeypatch):
 
     expected = os.path.normpath(str(home / 'Calibre' / 'drc' / 'calibre.drc.cell'))
     assert '*drcRulesFile: {}\n'.format(expected) in content
+
+
+# --------------------------------------------------------------------------
+# Hierarchy levels and boundary-scoped waivers (policy version 2)
+
+
+def _gds_real8(value):
+    """Encode a float as a GDSII 8-byte real."""
+    if value == 0:
+        return b'\x00' * 8
+    sign = 0x80 if value < 0 else 0
+    value = abs(value)
+    exponent = 0
+    while value >= 1.0:
+        value /= 16.0
+        exponent += 1
+    while value < 1.0 / 16.0:
+        value *= 16.0
+        exponent -= 1
+    mantissa = int(round(value * (1 << 56)))
+    return bytes([sign | (exponent + 64)]) + mantissa.to_bytes(7, 'big')
+
+
+def _rec(rtype, dtype, body=b''):
+    import struct
+    return struct.pack('>HBB', 4 + len(body), rtype, dtype) + body
+
+
+def _xy(points):
+    import struct
+    return b''.join(struct.pack('>ii', x, y) for x, y in points)
+
+
+def _write_gds(path, cells):
+    """cells: {name: {'boxes': [(x0,y0,x1,y1)], 'refs': [(name, x, y, reflect, angle)]}} in nm."""
+    import struct
+    out = [_rec(0x00, 0x02, struct.pack('>h', 600)),
+           _rec(0x01, 0x02, b'\x00' * 24),
+           _rec(0x02, 0x06, b'LIB\x00'),
+           _rec(0x03, 0x05, _gds_real8(0.001) + _gds_real8(1e-9))]
+    for name, body in cells.items():
+        out.append(_rec(0x05, 0x02, b'\x00' * 24))
+        out.append(_rec(0x06, 0x06, name.encode() + (b'\x00' if len(name) % 2 else b'')))
+        for x0, y0, x1, y1 in body.get('boxes', []):
+            out += [_rec(0x08, 0x00), _rec(0x0D, 0x02, struct.pack('>h', 31)),
+                    _rec(0x0E, 0x02, struct.pack('>h', 0)),
+                    _rec(0x10, 0x03, _xy([(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)])),
+                    _rec(0x11, 0x00)]
+        for ref, x, y, reflect, angle in body.get('refs', []):
+            out += [_rec(0x0A, 0x00), _rec(0x12, 0x06, ref.encode() + (b'\x00' if len(ref) % 2 else b''))]
+            if reflect or angle:
+                out.append(_rec(0x1A, 0x01, struct.pack('>H', 0x8000 if reflect else 0)))
+            if angle:
+                out.append(_rec(0x1C, 0x05, _gds_real8(float(angle))))
+            out += [_rec(0x10, 0x03, _xy([(x, y)])), _rec(0x11, 0x00)]
+        out.append(_rec(0x07, 0x00))
+    out.append(_rec(0x04, 0x00))
+    Path(path).write_bytes(b''.join(out))
+
+
+def test_gds_cell_extent_follows_placements(tmp_path):
+    from bag.verification.gds_extent import gds_cell_extent
+    gds = tmp_path / 'layout.gds'
+    _write_gds(gds, {
+        'leaf': {'boxes': [(0, 0, 100, 300)]},
+        'top': {'boxes': [(0, 0, 1000, 1000)],
+                # rotated 90 deg at (1000, 0): the leaf spans x in [700, 1000], y in [0, 100];
+                # reflected at (-200, 0): x in [-200, -100], y in [-300, 0]
+                'refs': [('leaf', 1000, 0, False, 90), ('leaf', -200, 0, True, 0)]},
+    })
+    assert gds_cell_extent(str(gds), 'leaf') == (0.0, 0.0, 0.1, 0.3)
+    assert gds_cell_extent(str(gds), 'top') == (-0.2, -0.3, 1.0, 1.0)
+    with pytest.raises(KeyError):
+        gds_cell_extent(str(gds), 'missing')
+
+
+POLICY_V2 = (
+    'version: 2\n'
+    'levels:\n'
+    '  cell: bag_cell\n'
+    '  block: bag_block\n'
+    'profiles:\n'
+    '  bag_cell:\n'
+    '    scope:\n'
+    '      runsets: [drc.cell.runset]\n'
+    '      libraries: ["*_generated"]\n'
+    '    boundary_margin_nm: 50\n'
+    '    waive:\n'
+    '      - rule: PP.W.1\n'
+    '        reason: implant cut at the cell edge, completed by the parent\n'
+    '        where: boundary\n'
+    '      - rule: LDN.EX.2\n'
+    '        reason: completed at the parent level\n'
+    '  bag_block:\n'
+    '    scope:\n'
+    '      runsets: [drc.cell.runset]\n'
+    '      libraries: ["*_generated"]\n'
+    '    waive:\n'
+    '      - rule: LDN.EX.2\n'
+    '        reason: completed at chip integration\n'
+)
+
+SUMMARY_V2 = (
+    'RULECHECK PP.W.1 ........ TOTAL Result Count = 3 (3)\n'
+    'RULECHECK LDN.EX.2 ...... TOTAL Result Count = 1 (1)\n'
+    'TOTAL DRC Results Generated: 4 (4)\n'
+)
+
+# Cell extent is (0, 0, 1, 1) um. Two PP.W.1 markers sit on the edge, one inside.
+RESULTS_V2 = (
+    'inv_2x 1000\n'
+    'PP.W.1\n'
+    '3 3 3 Nov 8 00:00:00 2026\n'
+    'PP.W.1 { @ implant width\n'
+    'p 1 4\n'
+    '0 400\n'
+    '60 400\n'
+    '60 600\n'
+    '0 600\n'
+    'p 2 4\n'
+    '400 950\n'
+    '600 950\n'
+    '600 1000\n'
+    '400 1000\n'
+    'p 3 4\n'
+    '400 400\n'
+    '460 400\n'
+    '460 600\n'
+    '400 600\n'
+    'LDN.EX.2\n'
+    '1 1 1 Nov 8 00:00:00 2026\n'
+    'p 1 4\n'
+    '500 500\n'
+    '510 500\n'
+    '510 510\n'
+    '500 510\n'
+)
+
+
+def _v2_rundir(tmp_path, policy=POLICY_V2, with_gds=True, with_results=True):
+    (tmp_path / 'calibre.log').write_text('calibre output\n', encoding='utf-8')
+    (tmp_path / 'inv_2x.drc.summary').write_text(SUMMARY_V2, encoding='utf-8')
+    results = tmp_path / 'inv_2x.drc.results'
+    if with_results:
+        results.write_text(RESULTS_V2, encoding='utf-8')
+    elif results.exists():
+        results.unlink()
+    gds = tmp_path / 'layout.gds'
+    if with_gds:
+        _write_gds(gds, {'inv_2x': {'boxes': [(0, 0, 1000, 1000)]}})
+    elif gds.exists():
+        gds.unlink()
+    (tmp_path / 'drc_policy.yaml').write_text(policy, encoding='utf-8')
+
+
+def _judge(tmp_path, **kwargs):
+    args = dict(policy_file=str(tmp_path / 'drc_policy.yaml'), runset_file='/pdk/drc.cell.runset',
+                lib_name='logic_generated', cell_name='inv_2x', run_dir=str(tmp_path))
+    args.update(kwargs)
+    passed, _ = drc_passed(0, str(tmp_path / 'calibre.log'), str(tmp_path / 'inv_2x.drc.summary'), **args)
+    return passed, json.loads((tmp_path / 'drc_policy_result.json').read_text(encoding='utf-8'))
+
+
+def test_boundary_waiver_keeps_interior_markers(tmp_path):
+    _v2_rundir(tmp_path)
+    passed, result = _judge(tmp_path, policy_level='cell')
+    assert passed is False
+    assert result['policy_profile'] == 'bag_cell'
+    assert result['extent'] == [0.0, 0.0, 1.0, 1.0] and result['extent_source'] == 'gds'
+    assert result['waived_rules'] == {'PP.W.1': 2, 'LDN.EX.2': 1}
+    assert result['remaining_rules'] == {'PP.W.1': 1}
+    assert result['remaining_violation_count'] == 1
+    assert result['remaining_markers'] == {'PP.W.1': [[0.4, 0.4, 0.46, 0.6]]}
+    entry = result['boundary_waivers']['PP.W.1']
+    assert (entry['scope'], entry['summary_count'], entry['marker_count']) == ('boundary', 3, 3)
+    assert (entry['waived'], entry['remaining'], entry['margin_um']) == (2, 1, 0.05)
+
+
+def test_boundary_waiver_fails_closed_without_extent_or_markers(tmp_path):
+    _v2_rundir(tmp_path, with_gds=False)
+    passed, result = _judge(tmp_path, policy_level='cell')
+    assert passed is False
+    assert result['remaining_rules'] == {'PP.W.1': 3}
+    assert result['boundary_waivers']['PP.W.1']['scope'] == 'extent_unavailable'
+
+    _v2_rundir(tmp_path, with_results=False)
+    passed, result = _judge(tmp_path, policy_level='cell')
+    assert result['remaining_rules'] == {'PP.W.1': 3}
+    assert result['boundary_waivers']['PP.W.1']['scope'] == 'no_markers'
+
+
+def test_level_selects_the_profile_owner_side(tmp_path):
+    _v2_rundir(tmp_path)
+    passed, result = _judge(tmp_path, policy_level='block')
+    assert result['policy_profile'] == 'bag_block'
+    # bag_block does not waive the implant rule at all, edge markers included.
+    assert result['remaining_rules'] == {'PP.W.1': 3}
+    assert result['waived_rules'] == {'LDN.EX.2': 1}
+
+    passed, result = _judge(tmp_path, policy_level='chip')
+    assert passed is False and 'level not found' in result['error']
+
+    # A profile given together with a level must agree with the map.
+    passed, result = _judge(tmp_path, policy_level='block', policy_profile='bag_cell')
+    assert passed is False and 'maps to' in result['error']
+
+
+def test_version_1_policy_rejects_boundary_scope_and_levels(tmp_path):
+    _v2_rundir(tmp_path, policy=POLICY_V2.replace('version: 2', 'version: 1'))
+    passed, result = _judge(tmp_path, policy_profile='bag_cell')
+    assert passed is False and 'version 2' in result['error']
+    passed, result = _judge(tmp_path, policy_level='block', policy_profile='bag_cell')
+    assert passed is False and 'version 2' in result['error']
+    # Level "cell" is what a version 1 file means by its only profile: the
+    # profile stands, and the policy file's where: lines are still refused.
+    passed, result = _judge(tmp_path, policy_level='cell', policy_profile='bag_cell')
+    assert result['policy_profile'] == 'bag_cell' and 'version 2' in result['error']
