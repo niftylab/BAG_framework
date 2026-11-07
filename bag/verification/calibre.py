@@ -292,11 +292,32 @@ def _drc_results_markers(content, rule_names):
     return out
 
 
+def _marker_depth(marker, extent):
+    # type: (Tuple[float, float, float, float], Tuple[float, float, float, float]) -> float
+    """How far inside the extent the marker starts: its smallest distance to any edge.
+
+    Zero or negative means the marker touches or crosses the cell edge.
+    """
+    return min(marker[0] - extent[0], marker[1] - extent[1],
+               extent[2] - marker[2], extent[3] - marker[3])
+
+
 def _touches_boundary(marker, extent, margin_um):
     # type: (Tuple[float, float, float, float], Tuple[float, float, float, float], float) -> bool
     """True when the marker comes within ``margin_um`` of any edge of the extent."""
-    return (marker[0] <= extent[0] + margin_um or marker[1] <= extent[1] + margin_um
-            or marker[2] >= extent[2] - margin_um or marker[3] >= extent[3] - margin_um)
+    return _marker_depth(marker, extent) <= margin_um
+
+
+def _drc_profile_extent_layer(policy, policy_profile):
+    # type: (Dict[str, Any], str) -> Optional[str]
+    """The profile's ``extent_layer`` (e.g. ``"108/0"``, the PDK prBoundary) or None."""
+    profile = (policy.get('profiles') or {}).get(policy_profile) or {}
+    layer = profile.get('extent_layer')
+    if layer is None:
+        return None
+    from .gds_extent import parse_layer
+    lay, dt = parse_layer(layer)
+    return '{}/{}'.format(lay, dt)
 
 
 def _find_drc_results_file(run_dir, cell_name):
@@ -405,14 +426,28 @@ def drc_passed(retcode, log_file, summary_file, policy_file=None,
         extent = None
         markers = {}  # type: Dict[str, List[Tuple[float, float, float, float]]]
         if boundary_rules:
+            extent_layer = _drc_profile_extent_layer(policy, policy_profile)
+            result['extent_layer'] = extent_layer
             gds_path = gds_file or (os.path.join(audit_dir, 'layout.gds') if audit_dir else None)
             if gds_path and os.path.isfile(gds_path) and cell_name:
                 try:
                     from .gds_extent import gds_cell_extent
-                    extent = gds_cell_extent(gds_path, cell_name)
+                    if extent_layer is not None:
+                        try:
+                            # The placement box: the PDK prBoundary the templates draw.
+                            extent = gds_cell_extent(gds_path, cell_name, layer=extent_layer)
+                            result['extent_source'] = 'layer {}'.format(extent_layer)
+                        except ValueError as err:
+                            # Nothing on that layer (a cell drawn without templates):
+                            # fall back to every drawn shape and say so.
+                            result['extent_layer_error'] = str(err)
+                    if extent is None:
+                        extent = gds_cell_extent(gds_path, cell_name)
+                        result['extent_source'] = 'all_layers'
                     result['extent'] = list(extent)
-                    result['extent_source'] = 'gds'
                 except Exception as err:  # fail closed: boundary waivers stay violations
+                    extent = None
+                    result['extent_source'] = 'unavailable'
                     result['extent_error'] = '{}: {}'.format(type(err).__name__, err)
             results_path = results_file or _find_drc_results_file(audit_dir, cell_name)
             if results_path and os.path.isfile(results_path):
@@ -447,6 +482,15 @@ def drc_passed(retcode, log_file, summary_file, policy_file=None,
                 waived = [m for m in rule_markers if _touches_boundary(m, extent, margin)]
                 kept = [m for m in rule_markers if not _touches_boundary(m, extent, margin)]
                 entry['scope'] = 'boundary'
+                # Depth statistics: how deep the waived markers reach and how
+                # close the kept ones come. A margin is right when the two sets
+                # are clearly apart on known-clean cells.
+                entry['waived_depth_max_um'] = (
+                    round(max(_marker_depth(m, extent) for m in waived), 6) if waived else None
+                )
+                entry['remaining_depth_min_um'] = (
+                    round(min(_marker_depth(m, extent) for m in kept), 6) if kept else None
+                )
                 if len(rule_markers) == count:
                     waived_count = len(waived)
                 else:

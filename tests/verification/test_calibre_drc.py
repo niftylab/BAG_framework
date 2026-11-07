@@ -509,7 +509,10 @@ def test_boundary_waiver_keeps_interior_markers(tmp_path):
     passed, result = _judge(tmp_path, policy_level='cell')
     assert passed is False
     assert result['policy_profile'] == 'bag_cell'
-    assert result['extent'] == [0.0, 0.0, 1.0, 1.0] and result['extent_source'] == 'gds'
+    assert result['extent'] == [0.0, 0.0, 1.0, 1.0] and result['extent_source'] == 'all_layers'
+    entry = result['boundary_waivers']['PP.W.1']
+    # Two markers on the edge (depth 0), one 0.4 um inside.
+    assert (entry['waived_depth_max_um'], entry['remaining_depth_min_um']) == (0.0, 0.4)
     assert result['waived_rules'] == {'PP.W.1': 2, 'LDN.EX.2': 1}
     assert result['remaining_rules'] == {'PP.W.1': 1}
     assert result['remaining_violation_count'] == 1
@@ -558,3 +561,50 @@ def test_version_1_policy_rejects_boundary_scope_and_levels(tmp_path):
     # profile stands, and the policy file's where: lines are still refused.
     passed, result = _judge(tmp_path, policy_level='cell', policy_profile='bag_cell')
     assert result['policy_profile'] == 'bag_cell' and 'version 2' in result['error']
+
+
+def _write_gds_layers(path, cells):
+    """Like _write_gds but boxes carry their own (layer, dtype): {name: [(layer, dtype, (x0,y0,x1,y1))]}."""
+    import struct
+    out = [_rec(0x00, 0x02, struct.pack('>h', 600)),
+           _rec(0x01, 0x02, b'\x00' * 24),
+           _rec(0x02, 0x06, b'LIB\x00'),
+           _rec(0x03, 0x05, _gds_real8(0.001) + _gds_real8(1e-9))]
+    for name, boxes in cells.items():
+        out.append(_rec(0x05, 0x02, b'\x00' * 24))
+        out.append(_rec(0x06, 0x06, name.encode() + (b'\x00' if len(name) % 2 else b'')))
+        for layer, dtype, (x0, y0, x1, y1) in boxes:
+            out += [_rec(0x08, 0x00), _rec(0x0D, 0x02, struct.pack('>h', layer)),
+                    _rec(0x0E, 0x02, struct.pack('>h', dtype)),
+                    _rec(0x10, 0x03, _xy([(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)])),
+                    _rec(0x11, 0x00)]
+        out.append(_rec(0x07, 0x00))
+    out.append(_rec(0x04, 0x00))
+    Path(path).write_bytes(b''.join(out))
+
+
+def test_extent_layer_uses_the_placement_box_and_reports_per_layer_extents(tmp_path):
+    from bag.verification.gds_extent import gds_cell_extent, gds_layer_extents
+    gds = tmp_path / 'layout.gds'
+    # prBoundary (108/0) is the 1x1 um box; the implant overhangs it by 65 nm.
+    _write_gds_layers(gds, {'inv_2x': [(108, 0, (0, 0, 1000, 1000)), (25, 0, (-65, -30, 1065, 1000))]})
+    assert gds_cell_extent(str(gds), 'inv_2x') == (-0.065, -0.03, 1.065, 1.0)
+    assert gds_cell_extent(str(gds), 'inv_2x', layer='108/0') == (0.0, 0.0, 1.0, 1.0)
+    assert gds_layer_extents(str(gds), 'inv_2x') == {'108/0': (0.0, 0.0, 1.0, 1.0),
+                                                     '25/0': (-0.065, -0.03, 1.065, 1.0)}
+    with pytest.raises(ValueError):
+        gds_cell_extent(str(gds), 'inv_2x', layer='3/0')
+
+    # The policy names the layer; the marker 0.4 um inside the box stays a violation and
+    # the two edge markers are waived against the prBoundary, not the implant overhang.
+    _v2_rundir(tmp_path, policy=POLICY_V2.replace('boundary_margin_nm: 50\n',
+                                                  'boundary_margin_nm: 50\n    extent_layer: "108/0"\n'))
+    _write_gds_layers(gds, {'inv_2x': [(108, 0, (0, 0, 1000, 1000)), (25, 0, (-65, -30, 1065, 1000))]})
+    passed, result = _judge(tmp_path, policy_level='cell')
+    assert result['extent_source'] == 'layer 108/0' and result['extent'] == [0.0, 0.0, 1.0, 1.0]
+    assert result['remaining_rules'] == {'PP.W.1': 1}
+
+    # A cell drawn without templates has no prBoundary: fall back to every shape, and say so.
+    _write_gds_layers(gds, {'inv_2x': [(25, 0, (0, 0, 1000, 1000))]})
+    passed, result = _judge(tmp_path, policy_level='cell')
+    assert result['extent_source'] == 'all_layers' and 'extent_layer_error' in result
