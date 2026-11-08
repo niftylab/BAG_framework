@@ -425,7 +425,10 @@ def drc_passed(retcode, log_file, summary_file, policy_file=None,
         ]
         extent = None
         markers = {}  # type: Dict[str, List[Tuple[float, float, float, float]]]
-        if boundary_rules:
+        if not boundary_rules:
+            # No boundary-scoped rule fired, so the extent was never needed.
+            result['extent_source'] = 'not_needed'
+        else:
             extent_layer = _drc_profile_extent_layer(policy, policy_profile)
             result['extent_layer'] = extent_layer
             gds_path = gds_file or (os.path.join(audit_dir, 'layout.gds') if audit_dir else None)
