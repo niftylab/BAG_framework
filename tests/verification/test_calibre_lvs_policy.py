@@ -13,9 +13,12 @@ levels:
   block: bag_block
 profiles:
   bag_cell:
-    description: Parent joins split colon rails.
+    description: Parent joins split colon rails and supplies taps.
     runset:
       cmnVConnectColon: 1
+    svrf:
+      - LVS IGNORE DEVICE PIN MN B
+      - LVS IGNORE DEVICE PIN MP B
   bag_block:
     description: Rails must close inside the block.
     runset:
@@ -29,7 +32,9 @@ def _make_checker(tmp_path, policy=POLICY):
     runset.write_text(
         '*lvsLayoutPrimary: old_layout\n'
         '*lvsSourcePrimary: old_source\n'
-        '*cmnVConnectColon: 1\n',
+        '*cmnVConnectColon: 1\n'
+        '*lvsIncludeCmdsType: SVRF\n'
+        '*lvsSVRFCmds: {SOURCE CASE YES} {LAYOUT CASE YES} {} {}\n',
         encoding='utf-8',
     )
     checker = object.__new__(Calibre)
@@ -129,6 +134,49 @@ def test_policy_rejects_non_scalar_override(tmp_path):
     )
     with pytest.raises(ValueError, match='must be a scalar'):
         resolve_lvs_policy(str(policy), 'block')
+
+
+def test_cell_level_adds_bulk_ignore_and_keeps_tech_commands(tmp_path):
+    checker = _make_checker(tmp_path)
+    content = _runset(checker.setup_lvs_flow('lib', 'top', lvs_level='cell'))
+    assert ('*lvsSVRFCmds: {SOURCE CASE YES} {LAYOUT CASE YES} '
+            '{LVS IGNORE DEVICE PIN MN B} {LVS IGNORE DEVICE PIN MP B}\n') in content
+    assert '*lvsIncludeCmdsType: SVRF\n' in content
+
+
+def test_block_level_compares_bodies(tmp_path):
+    checker = _make_checker(tmp_path)
+    content = _runset(checker.setup_lvs_flow('lib', 'top', lvs_level='block'))
+    assert '*lvsSVRFCmds: {SOURCE CASE YES} {LAYOUT CASE YES} {} {}\n' in content
+    assert 'IGNORE DEVICE PIN' not in content
+
+
+def test_merge_svrf_fills_empty_slots_then_appends_without_repeats():
+    merge = calibre.merge_svrf_commands
+    assert merge('{A} {} {}', ['B']) == '{A} {B} {}'
+    assert merge('{A} {B}', ['C', 'A']) == '{A} {B} {C}'
+    assert merge(None, ['X']) == '{X}'
+    assert merge('{A} {}', []) == '{A} {}'
+
+
+def test_policy_rejects_multiline_or_braced_svrf(tmp_path):
+    policy = tmp_path / 'p.yaml'
+    policy.write_text(
+        'levels: {cell: c}\nprofiles:\n  c:\n    svrf:\n      - "LVS {X}"\n',
+        encoding='utf-8',
+    )
+    with pytest.raises(ValueError, match='one-line SVRF statements'):
+        resolve_lvs_policy(str(policy), 'cell')
+
+
+def test_svrf_with_modern_runset_fails_closed(tmp_path):
+    checker = _make_checker(tmp_path)
+    (tmp_path / 'lvs.runset').write_text(
+        'lvs.runDir.value = "./old"\n', encoding='utf-8'
+    )
+    with pytest.raises(ValueError, match='need a legacy'):
+        checker.modify_lvs_runset(str(tmp_path), 'lib', 'top', 'layout', 'l.gds',
+                                  's.net', {}, extra_svrf=['LVS IGNORE DEVICE PIN MN B'])
 
 
 def test_policy_verdict_is_calibre_verdict_and_writes_audit(tmp_path):

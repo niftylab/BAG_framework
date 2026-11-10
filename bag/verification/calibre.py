@@ -73,10 +73,12 @@ def resolve_lvs_policy(policy_file, policy_level):
     # type: (Optional[str], Optional[str]) -> Optional[Dict[str, Any]]
     """Map a hierarchy level (cell/block/...) to a profile and its runset overrides.
 
-    LVS has no per-rule markers to waive after the run, so a level does not
-    relax the verdict: it selects how Calibre is run (for example whether
-    ``name:`` colon labels are virtually connected), and the verdict stays
-    Calibre's own CORRECT/INCORRECT.  The ``levels:`` map lives in the policy
+    LVS has no per-rule markers to waive after the run, so a level never edits
+    the verdict: it selects how Calibre is run -- ``runset:`` overrides (for
+    example whether ``name:`` colon labels are virtually connected) and
+    ``svrf:`` statements added to the comparison (for example ``LVS IGNORE
+    DEVICE PIN MN B`` so a tapless cell's floating bodies are not compared) --
+    and the verdict stays Calibre's own CORRECT/INCORRECT.  The ``levels:`` map lives in the policy
     file, so a requester names only a level and never an override.  A level
     the file does not declare is an error (fail closed).  Without a level the
     policy is not applied and the runset is unchanged.
@@ -109,6 +111,14 @@ def resolve_lvs_policy(policy_file, policy_level):
                 'LVS policy profile {} runset {} must be a scalar.'.format(profile_name, key)
             )
         overrides[key] = value
+    svrf = profile.get('svrf') or []
+    if not isinstance(svrf, list) or not all(
+            isinstance(cmd, str) and cmd.strip() and not re.search(r'[{}\n]', cmd)
+            for cmd in svrf):
+        raise ValueError(
+            'LVS policy profile {} svrf must be a list of one-line SVRF statements '
+            'without braces.'.format(profile_name)
+        )
     return {
         'policy_file': policy_file,
         'policy_version': policy.get('version', 1),
@@ -116,7 +126,31 @@ def resolve_lvs_policy(policy_file, policy_level):
         'profile': profile_name,
         'description': profile.get('description'),
         'runset_overrides': overrides,
+        'svrf': [cmd.strip() for cmd in svrf],
     }
+
+
+def merge_svrf_commands(value, commands):
+    # type: (Optional[str], Sequence[str]) -> str
+    """Add SVRF statements to a Calibre Interactive ``lvsSVRFCmds`` Tcl list.
+
+    The tech runset already carries commands (``{SOURCE CASE YES} {LAYOUT CASE
+    YES} {} {}``); those are kept, empty slots are filled first, and a
+    statement already present is not repeated.
+    """
+    items = re.findall(r'\{([^{}]*)\}', value or '')
+    present = {item.strip() for item in items if item.strip()}
+    for cmd in commands:
+        if cmd in present:
+            continue
+        present.add(cmd)
+        for idx, item in enumerate(items):
+            if not item.strip():
+                items[idx] = cmd
+                break
+        else:
+            items.append(cmd)
+    return ' '.join('{%s}' % item for item in items)
 
 
 def _same_runset_value(left, right):
@@ -138,6 +172,7 @@ def lvs_policy_passed(retcode, log_file, policy, run_dir, lib_name, cell_name,
         'policy_level': policy['level'],
         'policy_profile': policy['profile'],
         'runset_overrides': policy['runset_overrides'],
+        'svrf': policy.get('svrf', []),
         'execution_log': log_file,
         'report_file': report_file,
         'retcode': retcode,
@@ -915,6 +950,7 @@ class Calibre(VirtuosoChecker):
             sch_file, lvs_params_actual,
             source_lib_name=source_lib_name,
             source_cell_name=source_cell_name,
+            extra_svrf=lvs_policy['svrf'] if lvs_policy is not None else None,
         )
 
         # save runset
@@ -1158,7 +1194,7 @@ class Calibre(VirtuosoChecker):
 
     def modify_lvs_runset(self, run_dir, lib_name, cell_name, lay_view, gds_file, netlist,
                           lvs_params, source_lib_name=None,
-                          source_cell_name=None):
+                          source_cell_name=None, extra_svrf=None):
         # type: (str, str, str, str, str, str, Dict[str, Any]) -> str
         """Modify the given LVS runset file.
 
@@ -1178,6 +1214,9 @@ class Calibre(VirtuosoChecker):
             the schematic netlist file.
         lvs_params : Dict[str, Any]
             override LVS parameters.
+        extra_svrf : Sequence[str], optional
+            SVRF statements (from an LVS policy level) merged into the legacy
+            runset's ``lvsSVRFCmds`` list, keeping its existing commands.
 
         Returns
         -------
@@ -1187,6 +1226,11 @@ class Calibre(VirtuosoChecker):
         runset_content = read_file(self.lvs_runset)
         if re.search(r'^\s*lvs\.[A-Za-z0-9_.]+\s*=', runset_content,
                      flags=re.MULTILINE):
+            if extra_svrf:
+                raise ValueError(
+                    'LVS policy svrf statements need a legacy (*key: value) runset; '
+                    '{} is in the modern format.'.format(self.lvs_runset)
+                )
             source_lib_name = source_lib_name or lib_name
             source_cell_name = source_cell_name or cell_name
             spice_file = os.path.join(run_dir, '%s.sp' % cell_name)
@@ -1265,6 +1309,12 @@ class Calibre(VirtuosoChecker):
         lvs_options['cmnFDIDEFLayoutPath'] = '%s.def' % cell_name
 
         lvs_options.update(lvs_params)
+        if extra_svrf:
+            lvs_options['lvsSVRFCmds'] = merge_svrf_commands(
+                lvs_options.get('lvsSVRFCmds'), extra_svrf
+            )
+            # Calibre Interactive reads lvsSVRFCmds only as SVRF text.
+            lvs_options['lvsIncludeCmdsType'] = 'SVRF'
 
         return ''.join(('*%s: %s\n' % (key, val) for key, val in lvs_options.items()))
 
