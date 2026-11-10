@@ -55,6 +55,109 @@ def lvs_passed(retcode, log_file):
     return stdout.decode() != '', log_file
 
 
+LVS_LEVEL_ENV = 'BAG_LVS_LEVEL'
+
+
+def _load_lvs_policy(policy_file):
+    # type: (str) -> Dict[str, Any]
+    policy = read_yaml(policy_file)
+    if not isinstance(policy, dict):
+        raise ValueError('LVS policy root must be a mapping.')
+    version = policy.get('version', 1)
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise ValueError('LVS policy version must be a positive integer.')
+    return policy
+
+
+def resolve_lvs_policy(policy_file, policy_level):
+    # type: (Optional[str], Optional[str]) -> Optional[Dict[str, Any]]
+    """Map a hierarchy level (cell/block/...) to a profile and its runset overrides.
+
+    LVS has no per-rule markers to waive after the run, so a level does not
+    relax the verdict: it selects how Calibre is run (for example whether
+    ``name:`` colon labels are virtually connected), and the verdict stays
+    Calibre's own CORRECT/INCORRECT.  The ``levels:`` map lives in the policy
+    file, so a requester names only a level and never an override.  A level
+    the file does not declare is an error (fail closed).  Without a level the
+    policy is not applied and the runset is unchanged.
+    """
+    if not policy_level:
+        return None
+    if not policy_file:
+        raise ValueError(
+            'LVS level {} needs lvs_policy_file in the checker config.'.format(policy_level)
+        )
+    policy = _load_lvs_policy(policy_file)
+    levels = policy.get('levels')
+    if not isinstance(levels, dict) or not levels:
+        raise ValueError('LVS policy declares no levels map.')
+    profile_name = levels.get(policy_level)
+    if not isinstance(profile_name, str) or not profile_name:
+        raise ValueError('LVS policy level not found: {}'.format(policy_level))
+    profile = (policy.get('profiles') or {}).get(profile_name)
+    if not isinstance(profile, dict):
+        raise ValueError('LVS policy profile not found: {}'.format(profile_name))
+    runset = profile.get('runset') or {}
+    if not isinstance(runset, dict):
+        raise ValueError('LVS policy profile {} runset must be a mapping.'.format(profile_name))
+    overrides = {}
+    for key, value in runset.items():
+        if not isinstance(key, str) or not key:
+            raise ValueError('LVS policy profile {} has an empty runset key.'.format(profile_name))
+        if value is None or isinstance(value, (dict, list)):
+            raise ValueError(
+                'LVS policy profile {} runset {} must be a scalar.'.format(profile_name, key)
+            )
+        overrides[key] = value
+    return {
+        'policy_file': policy_file,
+        'policy_version': policy.get('version', 1),
+        'level': policy_level,
+        'profile': profile_name,
+        'description': profile.get('description'),
+        'runset_overrides': overrides,
+    }
+
+
+def _same_runset_value(left, right):
+    # type: (Any, Any) -> bool
+    return str(left).strip() == str(right).strip()
+
+
+def lvs_policy_passed(retcode, log_file, policy, run_dir, lib_name, cell_name,
+                      report_file=None):
+    # type: (int, str, Dict[str, Any], str, str, str, Optional[str]) -> Tuple[bool, str]
+    """Calibre's own LVS verdict plus an audit of the level the run was made at."""
+    passed, log = lvs_passed(retcode, log_file)
+    result = {
+        'schema_version': 1,
+        'library': lib_name,
+        'cell': cell_name,
+        'policy_file': policy['policy_file'],
+        'policy_version': policy['policy_version'],
+        'policy_level': policy['level'],
+        'policy_profile': policy['profile'],
+        'runset_overrides': policy['runset_overrides'],
+        'execution_log': log_file,
+        'report_file': report_file,
+        'retcode': retcode,
+        'passed': bool(passed),
+    }
+    os.makedirs(run_dir, exist_ok=True)
+    audit_file = os.path.join(run_dir, 'lvs_policy_result.json')
+    with open(audit_file, 'w', encoding='utf-8') as stream:
+        json.dump(result, stream, indent=2, sort_keys=True)
+        stream.write('\n')
+    if os.path.isfile(log_file):
+        with open(log_file, 'a', encoding='utf-8') as stream:
+            stream.write(
+                '\nBAG LVS policy result: {} (level={}, profile={}, passed={})\n'.format(
+                    audit_file, policy['level'], policy['profile'], bool(passed)
+                )
+            )
+    return passed, log
+
+
 def _format_calibre_runset_value(value):
     # type: (Any) -> str
     if isinstance(value, bool):
@@ -592,6 +695,10 @@ class Calibre(VirtuosoChecker):
         optional YAML policy containing scoped cell-level DRC waivers.
     drc_policy_profile : str
         profile name selected from ``drc_policy_file``.
+    lvs_policy_file : str
+        optional YAML policy mapping an LVS hierarchy level (``cell``/``block``)
+        to runset overrides.  Applied only when a run names a level
+        (``lvs_level=`` or the ``BAG_LVS_LEVEL`` environment variable).
     rcx_run_dir : str
         the RCX run directory.
     rcx_runset : str
@@ -608,7 +715,8 @@ class Calibre(VirtuosoChecker):
     def __init__(self, tmp_dir, lvs_run_dir, lvs_runset, rcx_run_dir, rcx_runset,
                  source_added_file='$DK/Calibre/lvs/source.added', rcx_mode='pex',
                  xact_rules='', drc_run_dir=None, drc_runset=None,
-                 drc_policy_file=None, drc_policy_profile=None, **kwargs):
+                 drc_policy_file=None, drc_policy_profile=None,
+                 lvs_policy_file=None, **kwargs):
 
         max_workers = kwargs.get('max_workers', None)
         cancel_timeout = kwargs.get('cancel_timeout_ms', None)
@@ -631,6 +739,7 @@ class Calibre(VirtuosoChecker):
         self.drc_runset = drc_runset
         self.drc_policy_file = drc_policy_file
         self.drc_policy_profile = drc_policy_profile
+        self.lvs_policy_file = lvs_policy_file
         self.rcx_run_dir = os.path.abspath(rcx_run_dir)
         self.rcx_runset = rcx_runset
         self.rcx_link_files = rcx_link_files
@@ -729,6 +838,11 @@ class Calibre(VirtuosoChecker):
         source_netlist_path = kwargs.pop('source_netlist_path', None)
         source_lib_name = kwargs.pop('source_lib_name', lib_name)
         source_cell_name = kwargs.pop('source_cell_name', cell_name)
+        lvs_level = kwargs.pop('lvs_level', None) or os.environ.get(LVS_LEVEL_ENV) or None
+        # Resolve before any export so an unknown level costs no tool run.
+        lvs_policy = resolve_lvs_policy(
+            getattr(self, 'lvs_policy_file', None), lvs_level
+        )
 
         # If not provided the gds layout, need to export layout
         if not gds_layout_path:
@@ -779,6 +893,18 @@ class Calibre(VirtuosoChecker):
         lvs_params_actual = self.default_lvs_params.copy()
         if params is not None:
             lvs_params_actual.update(params)
+        if lvs_policy is not None:
+            # The level owns these keys: a caller may repeat a value but never
+            # loosen it, the same way a DRC requester cannot pick waivers.
+            for key, value in lvs_policy['runset_overrides'].items():
+                if key in lvs_params_actual and not _same_runset_value(
+                        lvs_params_actual[key], value):
+                    raise ValueError(
+                        'LVS level {} sets {}={}; the run asked for {}.'.format(
+                            lvs_policy['level'], key, value, lvs_params_actual[key]
+                        )
+                    )
+                lvs_params_actual[key] = value
 
         with open_temp(prefix='lvsLog', dir=run_dir, delete=False) as logf:
             log_file = logf.name
@@ -798,7 +924,22 @@ class Calibre(VirtuosoChecker):
 
         cmd = ['calibre', '-gui', '-lvs', '-runset', runset_fname, '-batch']
 
-        flow_list.append((cmd, log_file, None, run_dir, lvs_passed))
+        if lvs_policy is None:
+            flow_list.append((cmd, log_file, None, run_dir, lvs_passed))
+        else:
+            report_file = os.path.join(run_dir, '%s.lvs.report' % cell_name)
+            flow_list.append(
+                (
+                    cmd,
+                    log_file,
+                    None,
+                    run_dir,
+                    lambda rc, lf: lvs_policy_passed(
+                        rc, lf, lvs_policy, run_dir, lib_name, cell_name,
+                        report_file=report_file,
+                    ),
+                )
+            )
 
         return flow_list
 
