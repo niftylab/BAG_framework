@@ -119,6 +119,16 @@ def resolve_lvs_policy(policy_file, policy_level):
             'LVS policy profile {} svrf must be a list of one-line SVRF statements '
             'without braces.'.format(profile_name)
         )
+    fail_on_vc = profile.get('fail_on_virtual_connect', False)
+    if not isinstance(fail_on_vc, bool):
+        raise ValueError(
+            'LVS policy profile {} fail_on_virtual_connect must be true or false.'.format(
+                profile_name)
+        )
+    svrf = [cmd.strip() for cmd in svrf]
+    if fail_on_vc and 'VIRTUAL CONNECT REPORT YES' not in svrf:
+        # Without the report an empty .ext would look like "no rail was split".
+        svrf.append('VIRTUAL CONNECT REPORT YES')
     return {
         'policy_file': policy_file,
         'policy_version': policy.get('version', 1),
@@ -126,8 +136,43 @@ def resolve_lvs_policy(policy_file, policy_level):
         'profile': profile_name,
         'description': profile.get('description'),
         'runset_overrides': overrides,
-        'svrf': [cmd.strip() for cmd in svrf],
+        'svrf': svrf,
+        'fail_on_virtual_connect': fail_on_vc,
     }
+
+
+_VC_SECTION_RE = re.compile(r'^Extraction Errors and Warnings for cell "([^"]+)"')
+_VC_NOTE_RE = re.compile(
+    r'Virtually connected "([^"]+)" at \(([-\d.]+),([-\d.]+)\) on layer (\S+)'
+    r' and \(([-\d.]+),([-\d.]+)\) on layer (\S+)'
+)
+
+
+def lvs_virtual_connections(ext_report):
+    # type: (str) -> List[Dict[str, Any]]
+    """Virtual connections Calibre made, from a ``<cell>.lvs.report.ext`` text.
+
+    Each ``NOTE: Virtually connected "VDD" at (x,y) on layer L and (x,y) on
+    layer L`` line (written under ``VIRTUAL CONNECT REPORT YES``) is one pair of
+    same-named pieces that were joined by name, not by metal.
+    """
+    found = []
+    cell = None
+    for line in ext_report.splitlines():
+        section = _VC_SECTION_RE.match(line.strip())
+        if section:
+            cell = section.group(1)
+            continue
+        note = _VC_NOTE_RE.search(line)
+        if note:
+            found.append({
+                'cell': cell,
+                'net': note.group(1),
+                'points_um': [[float(note.group(2)), float(note.group(3))],
+                              [float(note.group(5)), float(note.group(6))]],
+                'layers': [note.group(4), note.group(7)],
+            })
+    return found
 
 
 def merge_svrf_commands(value, commands):
@@ -161,8 +206,34 @@ def _same_runset_value(left, right):
 def lvs_policy_passed(retcode, log_file, policy, run_dir, lib_name, cell_name,
                       report_file=None):
     # type: (int, str, Dict[str, Any], str, str, str, Optional[str]) -> Tuple[bool, str]
-    """Calibre's own LVS verdict plus an audit of the level the run was made at."""
+    """Calibre's own LVS verdict plus an audit of the level the run was made at.
+
+    With ``fail_on_virtual_connect`` the level may only make the verdict
+    stricter: a CORRECT run still fails when Calibre joined same-named pieces
+    by name (``Virtually connected`` notes in ``<cell>.lvs.report.ext``), and
+    it fails closed when that report, or the report statement in the control
+    file, is missing.
+    """
     passed, log = lvs_passed(retcode, log_file)
+    calibre_passed = bool(passed)
+    vc_result = None
+    if policy.get('fail_on_virtual_connect'):
+        vc_result = {'checked': False, 'connections': [], 'error': None}
+        ext_file = os.path.join(run_dir, '%s.lvs.report.ext' % cell_name)
+        ctl_file = os.path.join(run_dir, '_calibre.lvs_')
+        vc_result['ext_report'] = ext_file
+        try:
+            if not os.path.isfile(ctl_file) or \
+                    'VIRTUAL CONNECT REPORT YES' not in read_file(ctl_file):
+                raise RuntimeError('control file lacks VIRTUAL CONNECT REPORT YES')
+            if not os.path.isfile(ext_file):
+                raise RuntimeError('extraction report is missing')
+            vc_result['connections'] = lvs_virtual_connections(read_file(ext_file))
+            vc_result['checked'] = True
+        except Exception as err:  # fail closed
+            vc_result['error'] = '{}: {}'.format(type(err).__name__, err)
+        if not vc_result['checked'] or vc_result['connections']:
+            passed = False
     result = {
         'schema_version': 1,
         'library': lib_name,
@@ -176,6 +247,8 @@ def lvs_policy_passed(retcode, log_file, policy, run_dir, lib_name, cell_name,
         'execution_log': log_file,
         'report_file': report_file,
         'retcode': retcode,
+        'calibre_passed': calibre_passed,
+        'virtual_connect_check': vc_result,
         'passed': bool(passed),
     }
     os.makedirs(run_dir, exist_ok=True)
@@ -186,8 +259,12 @@ def lvs_policy_passed(retcode, log_file, policy, run_dir, lib_name, cell_name,
     if os.path.isfile(log_file):
         with open(log_file, 'a', encoding='utf-8') as stream:
             stream.write(
-                '\nBAG LVS policy result: {} (level={}, profile={}, passed={})\n'.format(
-                    audit_file, policy['level'], policy['profile'], bool(passed)
+                '\nBAG LVS policy result: {} (level={}, profile={}, calibre_passed={}, '
+                'virtual_connections={}, passed={})\n'.format(
+                    audit_file, policy['level'], policy['profile'], calibre_passed,
+                    ('-' if vc_result is None else
+                     len(vc_result['connections']) if vc_result['checked'] else 'unchecked'),
+                    bool(passed),
                 )
             )
     return passed, log
